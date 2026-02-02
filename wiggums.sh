@@ -11,6 +11,7 @@ while :; do
   recently_completed=$(find "./bugs" "./tickets" -name "*.md" ! -name "CLAUDE.md" -mmin -3 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null)
   
   if [ -n "$recently_completed" ]; then
+    echo "Running verify.md"
     cat "./verify.md" | claude "$@"
     [ $? -eq 0 ] && exit 0
     continue
@@ -27,6 +28,7 @@ while :; do
   echo "⏳ Remaining:"
   echo "$remaining" | xargs -n1 basename
   
+  echo "Running prompt.md"
   cat "./prompt.md" | claude "$@"
   [ $? -eq 0 ] && exit 0
 done

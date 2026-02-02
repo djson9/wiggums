@@ -4,6 +4,12 @@ This directory holds bugs and tickets that the user would like to work on.
 Please run `pwd` to understand what directory we are in. Please list directories and note the bugs and tickets directories. Also note shortcuts.md.
 The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on bugs and tickets.
 
+Please run
+```
+grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "./bugs" "./tickets"
+```
+To see what tickets / bugs we should pick up next.
+
 ## How to Work in This Repo
 Pick up the next bug, or if there are no incomplete bugs, look at the next ticket. Do not pick up any tickets or bugs outside of the bugs or tickets folder.
 Select JUST one ticket to work / bug to work on. Please pick the ticket that will help most with the remaining work. Do not complete more than one uncompleted ticket. Do not pick up extra uncomplete tickets. Do not remove tickets.
@@ -25,6 +31,8 @@ To reference other tickets or bugs.
 
 IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find  tickets and bugs that may be related to this one, and read the relevant bug and issues.
 
+To understand the state of the repo, try running `git diff master...`
+
 Add your plan to tackle the bug or ticket in the same file as the ticket / bug.
 
 We should not assume any behaviors about ableton, we should inspect ableton ourselves via the am cli and query the osc to figure out what functionality actually exists.
@@ -32,6 +40,9 @@ We should not assume any behaviors about ableton, we should inspect ableton ours
 Do NOT use subagents or tasks! (Except for the initial explore agent to look at relevant tickets and bugs.)
 
 We should at least have these sections, for both bugs and tickets:
+
+### Additional Context
+If we gathered any additional context at the request of the user, describe it here. This could include additional context gathered from github, linear, slack, etc.
 ### Commands Run / Actions Taken
 Describe commands run and actions take to achieve the result.
 ### Results
