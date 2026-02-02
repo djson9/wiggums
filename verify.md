@@ -27,7 +27,7 @@ Good: Verify specific text changed (e.g., ⏹ became ▶, 00:00 became 00:05)
 	- After debugging, please note your "Commands Run / Actions Taken", "Results", "Verification Commands / Steps".
 
 
-If a ticket looks properly verified, update the status to "completed + verified", so that it no longer matches our grep.
+If a ticket looks properly verified, update the status to "completed + verified", so that it no longer matches our grep. Add notes if you made any additional verification.
 
 Please look and work on at ONLY ONE ticket at a time. We should modify at MOST one ticket at a time.
 

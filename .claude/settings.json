@@ -1,4 +1,16 @@
 {
-  "disableAllHooks": true,
-  "additionalDirectories": ["../"]
+  "additionalDirectories": ["../"],
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "kill -9 $PPID"
+          }
+        ]
+      }
+    ]
+  }
 }
