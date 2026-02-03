@@ -3,7 +3,7 @@
 ## Verifying Existing Tickets
 Please run:
 ```
-find "$plan_dir/bugs" "$plan_dir/tickets" -name "*.md" ! -name "CLAUDE.md" -mmin -3 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null
+find "{{WIGGUMS_DIR}}/bugs" "{{WIGGUMS_DIR}}/tickets" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null
 ```
 
 If any results comes back, these are tickets and bugs that were recently completed. Now please determine:
@@ -26,8 +26,8 @@ Good: Verify specific text changed (e.g., ⏹ became ▶, 00:00 became 00:05)
 	- Include relevant variable values, state information, and timestamps in logs
 	- After debugging, please note your "Commands Run / Actions Taken", "Results", "Verification Commands / Steps".
 
-
 If a ticket looks properly verified, update the status to "completed + verified", so that it no longer matches our grep. Add notes if you made any additional verification.
 
-Please look and work on at ONLY ONE ticket at a time. We should modify at MOST one ticket at a time.
+If we make any code changes, do NOT update the status. Instead, add repro steps to exactly verify the results. Another agent will come after you and perform the repro steps, and will update the status if they are able to repro.
 
+Please look and work on at ONLY ONE ticket at a time. We should modify at MOST one ticket at a time.

@@ -6,7 +6,7 @@ The user is primarily working out of the parent directory, and this wiggums dire
 
 Please run
 ```
-grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "./bugs" "./tickets"
+grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WIGGUMS_DIR}}/bugs" "{{WIGGUMS_DIR}}/tickets"
 ```
 To see what tickets / bugs we should pick up next.
 
@@ -34,8 +34,6 @@ IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find  t
 To understand the state of the repo, try running `git diff master...`
 
 Add your plan to tackle the bug or ticket in the same file as the ticket / bug.
-
-We should not assume any behaviors about ableton, we should inspect ableton ourselves via the am cli and query the osc to figure out what functionality actually exists.
 
 Do NOT use subagents or tasks! (Except for the initial explore agent to look at relevant tickets and bugs.)
 
@@ -76,13 +74,6 @@ Describes the commands and steps used to verify the result. Note whether we were
 <IMPORTANT>
 When finished with ANY bug or ticket, mark this ticket as `status: completed by writing it in the header of the file.
 </IMPORTANT>
-
-## Filing Bugs
-If we encountered ANY bugs (in the CLI, in our tooling, or adjacent to the feature we are building), please file in bugs directory. We should file all bugs in the bugs in the bugs directory before completing.
-
-A bug report should contain reproduction steps, exact commands. It should list potential files to explore. If relevant, theories on what is going on. It should explain user impact.
-
-If the bug prevented the ticket from being fully validated, do NOT set the ticket status to completed. Simply end the turn and return control to the user. We will investigate the bug first and return to the issue.
 
 ## Shortcuts
 <shortcuts.md>
