@@ -33,3 +33,9 @@ workspaces/
 mkdir -p workspaces/myworkspace/tickets
 touch workspaces/myworkspace/shortcuts.md
 ```
+
+## Install Symlink
+
+```bash
+./wiggums-symlink.sh ~/bin/wiggums
+```
