@@ -4,14 +4,7 @@
 
 # Ignore all ticket files
 tickets/
+ticket_drafts/
 
 # Ignore workspaces
 workspaces/
-
-# Ignore all md files except core ones
-*.md
-!CLAUDE.md
-!README.md
-!prompt.md
-!verify.md
-!shortcuts.md

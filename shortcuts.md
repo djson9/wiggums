@@ -231,5 +231,5 @@ sleep 3 && tmux capture-pane -t tui-test -p | grep "tick:"  # Second capture, sh
 
 **Key TUI files:**
 - `/Users/davidson/workspace/cli-middesk/tui/branches.go` - Branches TUI implementation
-- `/Users/davidson/workspace/linear-tui/` - Linear TUI (external binary)
+- `md linear tui` - Linear TUI (built into md CLI)
 - DefaultDelegate height: controls lines per item (2 = title+desc, 3 = title+desc+url)
