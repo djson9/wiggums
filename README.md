@@ -1,6 +1,8 @@
-# Wiggums
+# Ralph Wiggums
 
-Automated ticket runner that uses Claude to work through tickets.
+Ralph Wiggums is an LLM which runs inside of an endless while loop to accomplish user goals.
+
+Named after Ralph Wiggums, representing the power of persistent optimism in overcoming obstacles.
 
 ## Usage
 
