@@ -12,16 +12,12 @@ Ticket/task automation system that runs Claude Code in a loop to work through a 
 ## Running
 
 ```bash
-# Default workspace (tickets/ in root)
 ./wiggums.sh
-
-# Specific workspace
-./wiggums.sh -w ableton
 ```
 
 ## Ticket Format
 
-Files go in `tickets/` (or `workspaces/<name>/tickets/`) with naming: `[EPOCH]_[Title].md`
+Files go in `tickets/` with naming: `[EPOCH]_[Title].md`
 
 ```markdown
 Date: 2025-01-15
@@ -38,5 +34,5 @@ Comments:
 
 - Mark tickets `status: completed` when done
 - Add `completed + verified` after verification passes
-- The system has access to parent directory (`../`) for working on ableton-bouncer code
+- The system has access to parent directory (`../`) for working on other code
 - Tickets track work; actual code changes happen in the parent repo

@@ -3,22 +3,22 @@
 This directory holds tickets that the user would like to work on.
 Please run `pwd` to understand what directory we are in.
 
-**Current Workspace:** `{{WORKSPACE_DIR}}`
+**Wiggums Directory:** `{{WIGGUMS_DIR}}`
 
-The workspace contains:
-- `tickets/` - ticket files for this workspace
-- `shortcuts.md` - workspace-specific iteration shortcuts
+This directory contains:
+- `tickets/` - ticket files
+- `shortcuts.md` - iteration shortcuts
 
 The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on tickets.
 
 Please run
 ```
-grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WORKSPACE_DIR}}/tickets" 2>/dev/null
+grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WIGGUMS_DIR}}/tickets" 2>/dev/null
 ```
 To see what tickets we should pick up next.
 
 ## How to Work in This Repo
-Pick up the next ticket. Do not pick up any tickets outside of the workspace's tickets folder.
+Pick up the next ticket. Only work on tickets in the tickets/ folder.
 Select JUST one ticket to work on. Please pick the ticket that will help most with the remaining work. Do not complete more than one uncompleted ticket. Do not pick up extra uncomplete tickets. Do not remove tickets.
 
 Please include execution plan WITHIN the ticket.
@@ -27,7 +27,7 @@ Sometimes a ticket is completed, but the grep needs to return nothing to actuall
 
 If a human adds a ticket file to the tickets directory (it likely just be a title and text inside), please add the metadata WITHOUT changing the original content, and have the title match our format as well.
 
-Please read `{{WORKSPACE_DIR}}/shortcuts.md` for tips on iteration shortcuts to help us iterate faster.
+Please read `{{WIGGUMS_DIR}}/shortcuts.md` for tips on iteration shortcuts to help us iterate faster.
 
 ### Referencing other tickets
 Please use markdown format:
@@ -84,13 +84,13 @@ When finished with ANY ticket, mark it as `status: completed` by writing it in t
 
 ## Shortcuts
 <shortcuts.md>
-In each session, there will be workflows unique to this workspace that will take some time to figure out. For example, we may stumble around trying to figure out the best way to manually test something.
+In each session, there will be workflows that will take some time to figure out. For example, we may stumble around trying to figure out the best way to manually test something.
 
 Reflect on what workflows took a long term to figure out, specifically thinking about workflows that would be useful for future runs. Try to generalize one layer up, while still citing commands and relevant code. Shortcuts contains learnings that will help us "shortcut" through this hard to understand bits, and iterate faster.
 
-Think deeply about "why was iteration difficult" what breakthroughs helped us to iterate faster? What specific engineering concepts and workflows specific to this repository helped us iterate faster?
+Think deeply about "why was iteration difficult" what breakthroughs helped us to iterate faster? What specific engineering concepts and workflows helped us iterate faster?
 
-Include those learnings and shortcuts in `{{WORKSPACE_DIR}}/shortcuts.md`, please be as concise as possible.
+Include those learnings and shortcuts in `{{WIGGUMS_DIR}}/shortcuts.md`, please be as concise as possible.
 </shortcuts.md>
 
 
