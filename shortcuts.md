@@ -212,6 +212,23 @@ sleep 6 && tmux capture-pane -t tui-test -p | grep "tick:"  # First capture
 sleep 3 && tmux capture-pane -t tui-test -p | grep "tick:"  # Second capture, should show higher tick count
 ```
 
+**Confirmation dialogs in bubbletea:**
+- Use model state flags (e.g., `confirmingDelete bool`) to track dialog mode
+- Store context in model (e.g., `deleteCandidate BranchInfo`) for the action
+- In `Update()`, check dialog state BEFORE handling normal keys:
+  ```go
+  if m.confirmingDelete {
+      switch msg.String() {
+      case "y", "Y": return m, performActionCmd(m.deleteCandidate)
+      case "n", "N", "esc": m.confirmingDelete = false; return m, nil
+      }
+      return m, nil // Ignore other keys during confirmation
+  }
+  ```
+- In `View()`, change status/help lines when in confirmation mode
+- Add `clearEOL` (`\033[K`) to status/help lines to prevent artifacts when switching modes
+- Show success/error messages with auto-clear using timestamp: `if time.Since(m.messageAt) < 5*time.Second`
+
 **Key TUI files:**
 - `/Users/davidson/workspace/cli-middesk/tui/branches.go` - Branches TUI implementation
 - `/Users/davidson/workspace/linear-tui/` - Linear TUI (external binary)
