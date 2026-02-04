@@ -1,43 +1,50 @@
 # Wiggums
 
-This directory holds bugs and tickets that the user would like to work on.
-Please run `pwd` to understand what directory we are in. Please list directories and note the bugs and tickets directories. Also note shortcuts.md.
-The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on bugs and tickets.
+This directory holds tickets that the user would like to work on.
+Please run `pwd` to understand what directory we are in.
+
+**Current Workspace:** `{{WORKSPACE_DIR}}`
+
+The workspace contains:
+- `tickets/` - ticket files for this workspace
+- `shortcuts.md` - workspace-specific iteration shortcuts
+
+The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on tickets.
 
 Please run
 ```
-grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WIGGUMS_DIR}}/bugs" "{{WIGGUMS_DIR}}/tickets"
+grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WORKSPACE_DIR}}/tickets" 2>/dev/null
 ```
-To see what tickets / bugs we should pick up next.
+To see what tickets we should pick up next.
 
 ## How to Work in This Repo
-Pick up the next bug, or if there are no incomplete bugs, look at the next ticket. Do not pick up any tickets or bugs outside of the bugs or tickets folder.
-Select JUST one ticket to work / bug to work on. Please pick the ticket that will help most with the remaining work. Do not complete more than one uncompleted ticket. Do not pick up extra uncomplete tickets. Do not remove tickets.
+Pick up the next ticket. Do not pick up any tickets outside of the workspace's tickets folder.
+Select JUST one ticket to work on. Please pick the ticket that will help most with the remaining work. Do not complete more than one uncompleted ticket. Do not pick up extra uncomplete tickets. Do not remove tickets.
 
 Please include execution plan WITHIN the ticket.
 
-Sometimes a ticket is completed, but the grep needs to return nothing to actually complete. So we should add status: completed on any tickets or bugs that are actually completed.
+Sometimes a ticket is completed, but the grep needs to return nothing to actually complete. So we should add status: completed on any tickets that are actually completed.
 
-If a human adds a ticket file to the tickets or bugs directory (it likely just be a title and text inside), please add the metadata WITHOUT changing the original content, and have the title match our format as well.
+If a human adds a ticket file to the tickets directory (it likely just be a title and text inside), please add the metadata WITHOUT changing the original content, and have the title match our format as well.
 
-Please read shortcuts.md for tips on iteration shortcuts to help us iterate faster.
+Please read `{{WORKSPACE_DIR}}/shortcuts.md` for tips on iteration shortcuts to help us iterate faster.
 
 ### Referencing other tickets
 Please use markdown format:
 [[tickets/test_ticket.md|Hello world title]]
-To reference other tickets or bugs.
+To reference other tickets.
 
-## Beginning the Bug / Ticket
+## Beginning the Ticket
 
-IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find  tickets and bugs that may be related to this one, and read the relevant bug and issues.
+IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find tickets that may be related to this one, and read the relevant issues.
 
 To understand the state of the repo, try running `git diff master...`
 
-Add your plan to tackle the bug or ticket in the same file as the ticket / bug.
+Add your plan to tackle the ticket in the same file as the ticket.
 
-Do NOT use subagents or tasks! (Except for the initial explore agent to look at relevant tickets and bugs.)
+Do NOT use subagents or tasks! (Except for the initial explore agent to look at relevant tickets.)
 
-We should at least have these sections, for both bugs and tickets:
+We should at least have these sections for tickets:
 
 ### Additional Context
 If we gathered any additional context at the request of the user, describe it here. This could include additional context gathered from github, linear, slack, etc.
@@ -72,18 +79,18 @@ Describes the commands and steps used to verify the result. Note whether we were
 
 ----
 <IMPORTANT>
-When finished with ANY bug or ticket, mark this ticket as `status: completed by writing it in the header of the file.
+When finished with ANY ticket, mark it as `status: completed` by writing it in the header of the file.
 </IMPORTANT>
 
 ## Shortcuts
 <shortcuts.md>
-In each session, there will be workflows unique to this directory that will take some time to figure out. For example, we may stumble around trying to figure out the best way to manually test something. 
+In each session, there will be workflows unique to this workspace that will take some time to figure out. For example, we may stumble around trying to figure out the best way to manually test something.
 
 Reflect on what workflows took a long term to figure out, specifically thinking about workflows that would be useful for future runs. Try to generalize one layer up, while still citing commands and relevant code. Shortcuts contains learnings that will help us "shortcut" through this hard to understand bits, and iterate faster.
 
 Think deeply about "why was iteration difficult" what breakthroughs helped us to iterate faster? What specific engineering concepts and workflows specific to this repository helped us iterate faster?
 
-Include those learnings and shortcuts in Shortcuts.md, please be as concise as possible.
+Include those learnings and shortcuts in `{{WORKSPACE_DIR}}/shortcuts.md`, please be as concise as possible.
 </shortcuts.md>
 
 

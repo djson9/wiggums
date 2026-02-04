@@ -3,10 +3,10 @@
 ## Verifying Existing Tickets
 Please run:
 ```
-find "{{WIGGUMS_DIR}}/bugs" "{{WIGGUMS_DIR}}/tickets" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null
+find "{{WORKSPACE_DIR}}/tickets" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null
 ```
 
-If any results comes back, these are tickets and bugs that were recently completed. Now please determine:
+If any results comes back, these are tickets that were recently completed. Now please determine:
 - Did the verification steps actually verify what the user asked for? Did we successfully test end to end? Here are examples of good and bad verification:
 Bad:  Verified only that dialog appears, not actually running the command
 Bad: Verified only that help menu appears, not actually running the command
