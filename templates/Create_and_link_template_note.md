@@ -10,5 +10,10 @@ if (title) {
     await tp.file.create_new(template, fileName, false, folder);
     const datetime = tp.date.now("YYYY-MM-DD HH:mm");
     tR += `${datetime} [[ticket_drafts/${fileName}|${title}]]`;
+    // Open the new note after Buttons finishes appending the link
+    setTimeout(async () => {
+      const newFile = app.vault.getAbstractFileByPath(`${folder}/${fileName}.md`);
+      if (newFile) await app.workspace.getLeaf('split').openFile(newFile);
+    }, 200);
 }
 %>
