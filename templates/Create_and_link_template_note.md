@@ -12,7 +12,8 @@ if (title) {
     new Notice("Template 'Ticket_Template' not found!");
   } else {
     await tp.file.create_new(template, fileName, false, folder);
-    tR += `[[ticket_drafts/${fileName}|${title}]]`;
+    const datetime = tp.date.now("YYYY-MM-DD HH:mm");
+    tR += `${datetime} [[ticket_drafts/${fileName}|${title}]]`;
   }
 }
 %>

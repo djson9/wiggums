@@ -1,5 +1,5 @@
 ---
-Date: <% tp.date.now("YYYY-MM-DD") %>
+Date: <% tp.date.now("YYYY-MM-DD HH:mm") %>
 Status: created
 ---
 ## Original User Request
