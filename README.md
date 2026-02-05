@@ -4,6 +4,18 @@ Ralph Wiggums is an LLM which runs inside of an endless while loop to accomplish
 
 Named after Ralph Wiggums, representing the power of persistent optimism in overcoming obstacles.
 
+## Obsidian Setup
+
+Required plugins (install via Community Plugins):
+- **Templater** - for `tp.*` functions (prompts, file creation, moving)
+- **Buttons** - for clickable buttons in notes
+
+Templater settings:
+1. Set template folder to `templates/`
+2. Enable "Trigger Templater on new file creation"
+
+Copy `templates/` folder to your Obsidian vault.
+
 ## Usage
 
 ```bash
