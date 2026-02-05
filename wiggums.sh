@@ -24,12 +24,26 @@ while :; do
   fi
 
   # Verify recently completed tickets
-  recently_completed=$(find "$TICKETS_DIR" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null)
+  # Find completed tickets whose YAML frontmatter status is NOT "completed + verified"
+  recently_completed=""
+  for f in $(find "$TICKETS_DIR" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null); do
+    # Extract only the YAML frontmatter (between --- delimiters) and check status
+    header_status=$(awk '/^---$/{n++; next} n==1{print} n==2{exit}' "$f" | grep -i "status:")
+    echo "$header_status" | grep -qi "completed + verified" || recently_completed="$recently_completed $f"
+  done
+  recently_completed=$(echo "$recently_completed" | xargs)
 
   if [ -n "$recently_completed" ]; then
     echo "Running prompts/verify.md"
     echo "$recently_completed" | xargs -n1 basename
-    sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/verify.md" | claude "${CLAUDE_ARGS[@]}"
+    {
+      sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/verify.md"
+      echo ""
+      echo "## Tickets to verify:"
+      for f in $recently_completed; do
+        echo "- $f"
+      done
+    } | claude "${CLAUDE_ARGS[@]}"
     exit_code=$?
     [ $exit_code -eq 0 ] && exit 0
     # Delay before retry on failure to prevent rapid looping
@@ -50,7 +64,14 @@ while :; do
   echo "$remaining" | xargs -n1 basename
 
   echo "Running prompts/prompt.md"
-  sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/prompt.md" | claude "${CLAUDE_ARGS[@]}"
+  {
+    sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/prompt.md"
+    echo ""
+    echo "## Remaining tickets:"
+    echo "$remaining" | while read -r f; do
+      echo "- $f"
+    done
+  } | claude "${CLAUDE_ARGS[@]}"
   exit_code=$?
   [ $exit_code -eq 0 ] && exit 0
   # Delay before retry on failure to prevent rapid looping

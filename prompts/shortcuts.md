@@ -119,6 +119,32 @@ md linear oncall ls              # List oncall queue
 - Agency configs: `/Users/davidson/workspace/middesk/app/jobs/agent/skyvern_workflows/<agency>_retrieval_config.rb`
 - Constants (account IDs): `/Users/davidson/workspace/middesk/app/lib/agent/constants.rb`
 - The `account_status` (success/processing/remediation/duplicate) comes from Skyvern extraction, not Ruby code
+- Registry (config key lookup): `/Users/davidson/workspace/middesk/app/jobs/agent/skyvern_workflows/registry.rb`
+
+## Running Skyvern Submission Workflows
+**Key insight:** Config keys MUST include the full task type prefix, not just the agency slug.
+
+**List available configs:**
+```bash
+md skyvern run-workflow  # Shows configs and open tasks
+```
+
+**FL submission workflow (two-step):**
+```bash
+# Step 1: Credentials setup (triggers step 2 automatically on completion)
+md skyvern run-workflow <task_id> "SubmissionTask:credentials:fl_department_of_revenue" --prod
+
+# Step 2 (manual, if needed): Main submission
+md skyvern run-workflow <task_id> "SubmissionTask:fl_department_of_revenue" --prod
+```
+
+**CA EDD submission workflow:**
+```bash
+md skyvern run-workflow <task_id> "SubmissionTask:credentials:ca_employment_development_department" --prod
+md skyvern run-workflow <task_id> "SubmissionTask:ca_employment_development_department" --prod
+```
+
+**Common error:** "No configuration found for key..." - means you used just the agency slug instead of full config key with task type prefix
 
 ## Debugging TUI Applications (bubbletea/bubbles)
 
@@ -233,3 +259,38 @@ sleep 3 && tmux capture-pane -t tui-test -p | grep "tick:"  # Second capture, sh
 - `/Users/davidson/workspace/cli-middesk/tui/branches.go` - Branches TUI implementation
 - `md linear tui` - Linear TUI (built into md CLI)
 - DefaultDelegate height: controls lines per item (2 = title+desc, 3 = title+desc+url)
+
+## Ops Templates and Task Data (Util → Middesk)
+
+**How ops templates fetch task data:**
+1. `OpsTemplateRendererService` (util) calls `Middesk::Agent::Task.find(task_id)` via ActiveResource
+2. This hits `/internal/agent/tasks/:id` on middesk backend
+3. Response is serialized through `Agent::Util::TaskSerializer`
+
+**Passing query params with ActiveResource:**
+```ruby
+# Standard find (no params)
+Middesk::Agent::Task.find(task_id)
+
+# With query params (adds ?include=county to request)
+Middesk::Agent::Task.find(task_id, params: { include: 'county' })
+```
+
+**Key files:**
+- `/Users/davidson/workspace/util/app/services/ops_template_renderer_service.rb` - Renders ops templates
+- `/Users/davidson/workspace/util/app/lib/middesk/agent.rb` - ActiveResource models for agent
+- `/Users/davidson/workspace/middesk/app/controllers/api/internal/agent/tasks_controller.rb` - Task API endpoint
+
+**How conditional serializer attributes work:**
+```ruby
+# In serializer (middesk)
+attribute :county, if: :include_county?
+
+def include_county?
+  scope&.params&.dig(:include)&.split(',')&.include?('county')
+end
+```
+
+**SerializerScope concern** (`/Users/davidson/workspace/middesk/app/controllers/concerns/serializer_scope.rb`):
+- Passes `params` to serializers via `scope.params = params`
+- All internal API controllers include this concern

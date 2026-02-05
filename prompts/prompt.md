@@ -11,11 +11,7 @@ This directory contains:
 
 The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on tickets.
 
-Please run
-```
-grep -riL "status: completed" --include="*.md" --exclude="CLAUDE.md" "{{WIGGUMS_DIR}}/tickets" 2>/dev/null
-```
-To see what tickets we should pick up next.
+The remaining incomplete tickets are listed at the end of this prompt. Pick up the next one to work on.
 
 ## How to Work in This Repo
 Pick up the next ticket. Only work on tickets in the tickets/ folder.
