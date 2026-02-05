@@ -3,7 +3,7 @@ Date: <% tp.date.now("YYYY-MM-DD HH:mm") %>
 Status: created
 ---
 ## Original User Request
-Add your request here.
+
 
 ## Additional User Request
 To be populated with further user request
