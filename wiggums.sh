@@ -27,9 +27,9 @@ while :; do
   recently_completed=$(find "$TICKETS_DIR" -name "*.md" -not -name "CLAUDE.md" -mmin -60 -exec grep -li "status: completed" {} + 2>/dev/null | xargs grep -L "completed + verified" 2>/dev/null)
 
   if [ -n "$recently_completed" ]; then
-    echo "Running verify.md"
+    echo "Running prompts/verify.md"
     echo "$recently_completed" | xargs -n1 basename
-    sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./verify.md" | claude "${CLAUDE_ARGS[@]}"
+    sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/verify.md" | claude "${CLAUDE_ARGS[@]}"
     exit_code=$?
     [ $exit_code -eq 0 ] && exit 0
     # Delay before retry on failure to prevent rapid looping
@@ -49,8 +49,8 @@ while :; do
   echo "⏳ Remaining:"
   echo "$remaining" | xargs -n1 basename
 
-  echo "Running prompt.md"
-  sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompt.md" | claude "${CLAUDE_ARGS[@]}"
+  echo "Running prompts/prompt.md"
+  sed "s|{{WIGGUMS_DIR}}|$SCRIPT_DIR|g" "./prompts/prompt.md" | claude "${CLAUDE_ARGS[@]}"
   exit_code=$?
   [ $exit_code -eq 0 ] && exit 0
   # Delay before retry on failure to prevent rapid looping

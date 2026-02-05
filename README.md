@@ -26,7 +26,7 @@ Named after Ralph Wiggums, representing the power of persistent optimism in over
 workspaces/
 └── <name>/
     ├── tickets/      # ticket files
-    └── shortcuts.md  # workspace-specific shortcuts
+    └── prompts/shortcuts.md  # workspace-specific shortcuts
 ```
 
 ## Creating a New Workspace
