@@ -2,7 +2,7 @@
 
 Ralph Wiggums is an LLM which runs inside of an endless while loop to accomplish user goals.
 
-Named after Ralph Wiggums, representing the power of persistent optimism in overcoming obstacles.
+Named after Ralph Wiggums, representing the power of never ending optimism in overcoming obstacles.
 
 ## Obsidian Setup
 
