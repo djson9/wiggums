@@ -1,9 +1,11 @@
-.PHONY: run
+.PHONY: run build
 .DEFAULT_GOAL := run
 
-run:
-	@chmod +x wiggums.sh
-	./wiggums.sh $(ARGS)
+build:
+	go build -o wiggums .
+
+run: build
+	./wiggums run $(ARGS)
 
 yolo:
 	make run ARGS="--model opus --dangerously-skip-permissions"

@@ -9,3 +9,6 @@ ticket_drafts/
 # Ignore workspaces
 workspaces/
 index.md
+
+# Go binary
+/wiggums

@@ -1,6 +1,9 @@
 ---
 Date: <% tp.date.now("YYYY-MM-DD HH:mm") %>
 Status: created
+Agent:
+MinIterations:
+CurIteration: 0
 ---
 ## Original User Request
 
