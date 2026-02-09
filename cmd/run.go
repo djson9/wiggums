@@ -52,7 +52,7 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 		claudeArgs = append([]string{"--model", "opus", "--dangerously-skip-permissions"}, claudeArgs...)
 	}
 	if workDir != "" {
-		claudeArgs = append([]string{"--add-dir", baseDir}, claudeArgs...)
+		claudeArgs = append([]string{"--add-dir", workDir}, claudeArgs...)
 	}
 
 	os.Setenv("TERM", "xterm")
@@ -68,7 +68,7 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 	}
 
 	cfg := &loopConfig{
-		runner:        &ClaudeRunner{WorkDir: workDir},
+		runner:        &ClaudeRunner{WorkDir: baseDir},
 		promptLoader:  &FilePromptLoader{},
 		baseDir:       baseDir,
 		ticketsDir:    ticketsDir,

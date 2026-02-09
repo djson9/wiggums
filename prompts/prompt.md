@@ -4,7 +4,7 @@ This directory holds tickets that the user would like to work on.
 
 **Wiggums Directory:** `{{WIGGUMS_DIR}}`
 
-Your current working directory is the primary codebase you should be working in. The wiggums directory above is added as an additional directory — use it for reading/writing tickets and shortcuts, but do your actual code work in the current working directory.
+Your current working directory is the wiggums directory — it contains tickets, prompts, and `.claude` settings. The project codebase is added via `--add-dir` and is where you should do your actual code work. Use `{{WIGGUMS_DIR}}` paths for ticket and prompt operations.
 
 The remaining incomplete tickets are listed at the end of this prompt. Pick up the next one to work on.
 
