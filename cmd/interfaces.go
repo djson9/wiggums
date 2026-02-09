@@ -27,7 +27,8 @@ type loopConfig struct {
 	ticketsDir   string
 	claudeArgs   []string
 	agentFilter  string
-	workDir      string // external working directory for claude (e.g., workspace target repo)
+	workDir       string // external working directory for claude (e.g., workspace target repo)
+	shortcutsFile string // absolute path to the workspace's shortcuts.md
 }
 
 // ClaudeRunner is the real Runner implementation that shells out to the claude CLI.

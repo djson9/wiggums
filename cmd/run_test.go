@@ -575,6 +575,99 @@ func TestStripFrontmatter(t *testing.T) {
 	}
 }
 
+// --- Shortcuts path tests ---
+
+func TestRunLoop_ShortcutsPathSubstitution_Default(t *testing.T) {
+	dir := t.TempDir()
+	ticketsDir := filepath.Join(dir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	writeTicket(t, ticketsDir, "task.md", "---\nStatus: created\n---\nDo something\n")
+
+	runner := &mockRunner{exitCode: 0}
+	loader := &mockPromptLoader{result: "Read {{SHORTCUTS_PATH}} for tips"}
+	shortcutsFile := filepath.Join(dir, "prompts", "shortcuts.md")
+
+	cfg := &loopConfig{
+		runner:        runner,
+		promptLoader:  loader,
+		baseDir:       dir,
+		ticketsDir:    ticketsDir,
+		shortcutsFile: shortcutsFile,
+	}
+
+	err := runLoop(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 runner call, got %d", len(runner.calls))
+	}
+	if strings.Contains(runner.calls[0], "{{SHORTCUTS_PATH}}") {
+		t.Error("{{SHORTCUTS_PATH}} should have been substituted")
+	}
+	if !strings.Contains(runner.calls[0], shortcutsFile) {
+		t.Errorf("prompt should contain shortcuts path %q, got: %s", shortcutsFile, runner.calls[0])
+	}
+}
+
+func TestRunLoop_ShortcutsPathSubstitution_Workspace(t *testing.T) {
+	dir := t.TempDir()
+	wsTicketsDir := filepath.Join(dir, "workspaces", "myproject", "tickets")
+	os.MkdirAll(wsTicketsDir, 0755)
+	writeTicket(t, wsTicketsDir, "task.md", "---\nStatus: created\n---\nDo something\n")
+
+	runner := &mockRunner{exitCode: 0}
+	loader := &mockPromptLoader{result: "Read {{SHORTCUTS_PATH}} for tips"}
+	shortcutsFile := filepath.Join(dir, "workspaces", "myproject", "shortcuts.md")
+
+	cfg := &loopConfig{
+		runner:        runner,
+		promptLoader:  loader,
+		baseDir:       dir,
+		ticketsDir:    wsTicketsDir,
+		shortcutsFile: shortcutsFile,
+	}
+
+	err := runLoop(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(runner.calls[0], shortcutsFile) {
+		t.Errorf("prompt should contain workspace shortcuts path %q, got: %s", shortcutsFile, runner.calls[0])
+	}
+}
+
+func TestRunLoop_ShortcutsPathSubstitution_Verify(t *testing.T) {
+	dir := t.TempDir()
+	ticketsDir := filepath.Join(dir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	path := writeTicket(t, ticketsDir, "done.md", "---\nStatus: completed\n---\nDone\n")
+	touchRecent(t, path)
+
+	runner := &mockRunner{exitCode: 0}
+	loader := &mockPromptLoader{result: "Verify with {{SHORTCUTS_PATH}}"}
+	shortcutsFile := filepath.Join(dir, "prompts", "shortcuts.md")
+
+	cfg := &loopConfig{
+		runner:        runner,
+		promptLoader:  loader,
+		baseDir:       dir,
+		ticketsDir:    ticketsDir,
+		shortcutsFile: shortcutsFile,
+	}
+
+	err := runLoop(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(runner.calls[0], "{{SHORTCUTS_PATH}}") {
+		t.Error("{{SHORTCUTS_PATH}} should have been substituted in verify prompt")
+	}
+	if !strings.Contains(runner.calls[0], shortcutsFile) {
+		t.Errorf("verify prompt should contain shortcuts path %q", shortcutsFile)
+	}
+}
+
 // --- Workspace tests ---
 
 func TestReadWorkspaceDirectory(t *testing.T) {

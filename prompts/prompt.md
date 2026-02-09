@@ -23,7 +23,7 @@ Sometimes a ticket is completed, but the grep needs to return nothing to actuall
 
 If a human adds a ticket file to the tickets directory (it likely just be a title and text inside), please add the metadata WITHOUT changing the original content, and have the title match our format as well.
 
-Please read `{{WIGGUMS_DIR}}/prompts/shortcuts.md` for tips on iteration shortcuts to help us iterate faster.
+Please read `{{SHORTCUTS_PATH}}` for tips on iteration shortcuts to help us iterate faster.
 
 ### Referencing other tickets
 Please use markdown format:
@@ -86,7 +86,7 @@ Reflect on what workflows took a long term to figure out, specifically thinking 
 
 Think deeply about "why was iteration difficult" what breakthroughs helped us to iterate faster? What specific engineering concepts and workflows helped us iterate faster?
 
-Include those learnings and shortcuts in `{{WIGGUMS_DIR}}/prompts/shortcuts.md`, please be as concise as possible.
+Include those learnings and shortcuts in `{{SHORTCUTS_PATH}}`, please be as concise as possible.
 </shortcuts.md>
 
 

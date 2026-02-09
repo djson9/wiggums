@@ -59,14 +59,20 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 		ticketsDir = ticketsDirOverride
 	}
 
+	shortcutsFile := filepath.Join(baseDir, "prompts", "shortcuts.md")
+	if ticketsDirOverride != "" {
+		shortcutsFile = filepath.Join(filepath.Dir(ticketsDirOverride), "shortcuts.md")
+	}
+
 	cfg := &loopConfig{
-		runner:       &ClaudeRunner{WorkDir: workDir},
-		promptLoader: &FilePromptLoader{},
-		baseDir:      baseDir,
-		ticketsDir:   ticketsDir,
-		claudeArgs:   claudeArgs,
-		agentFilter:  agentFilter,
-		workDir:      workDir,
+		runner:        &ClaudeRunner{WorkDir: workDir},
+		promptLoader:  &FilePromptLoader{},
+		baseDir:       baseDir,
+		ticketsDir:    ticketsDir,
+		claudeArgs:    claudeArgs,
+		agentFilter:   agentFilter,
+		workDir:       workDir,
+		shortcutsFile: shortcutsFile,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -114,6 +120,7 @@ func runLoop(ctx context.Context, cfg *loopConfig) error {
 			if err != nil {
 				return fmt.Errorf("error building verify prompt: %w", err)
 			}
+			prompt = strings.ReplaceAll(prompt, "{{SHORTCUTS_PATH}}", cfg.shortcutsFile)
 
 			exitCode, err := cfg.runner.Run(ctx, prompt, cfg.claudeArgs)
 			if err != nil {
@@ -163,6 +170,7 @@ func runLoop(ctx context.Context, cfg *loopConfig) error {
 		if err != nil {
 			return fmt.Errorf("error building work prompt: %w", err)
 		}
+		prompt = strings.ReplaceAll(prompt, "{{SHORTCUTS_PATH}}", cfg.shortcutsFile)
 
 		exitCode, err := cfg.runner.Run(ctx, prompt, cfg.claudeArgs)
 		if err != nil {
