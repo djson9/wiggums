@@ -27,16 +27,22 @@ type loopConfig struct {
 	ticketsDir   string
 	claudeArgs   []string
 	agentFilter  string
+	workDir      string // external working directory for claude (e.g., workspace target repo)
 }
 
 // ClaudeRunner is the real Runner implementation that shells out to the claude CLI.
-type ClaudeRunner struct{}
+type ClaudeRunner struct {
+	WorkDir string // if set, claude runs in this directory
+}
 
 func (c *ClaudeRunner) Run(ctx context.Context, prompt string, args []string) (int, error) {
 	cmd := exec.CommandContext(ctx, "claude", args...)
 	cmd.Stdin = strings.NewReader(prompt)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	if c.WorkDir != "" {
+		cmd.Dir = c.WorkDir
+	}
 
 	err := cmd.Run()
 	if err == nil {
@@ -69,7 +75,8 @@ func (f *FilePromptLoader) Load(baseDir, promptFile, header string, tickets []st
 	if agentPromptFile != "" {
 		agentPath := filepath.Join(baseDir, agentPromptFile)
 		if agentContent, err := os.ReadFile(agentPath); err == nil {
-			agentPrompt := strings.ReplaceAll(string(agentContent), "{{WIGGUMS_DIR}}", baseDir)
+			agentPrompt := stripFrontmatter(string(agentContent))
+			agentPrompt = strings.ReplaceAll(agentPrompt, "{{WIGGUMS_DIR}}", baseDir)
 			b.WriteString("\n\n")
 			b.WriteString(agentPrompt)
 		}
@@ -85,4 +92,16 @@ func (f *FilePromptLoader) Load(baseDir, promptFile, header string, tickets []st
 	}
 
 	return b.String(), nil
+}
+
+// stripFrontmatter removes YAML frontmatter (between --- delimiters) from content.
+func stripFrontmatter(content string) string {
+	if !strings.HasPrefix(strings.TrimSpace(content), "---") {
+		return content
+	}
+	parts := strings.SplitN(content, "---", 3)
+	if len(parts) < 3 {
+		return content
+	}
+	return strings.TrimSpace(parts[2])
 }

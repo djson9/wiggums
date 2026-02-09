@@ -6,8 +6,8 @@
 tickets/
 ticket_drafts/
 
-# Ignore workspaces
-workspaces/
+# Track workspaces dir but ignore contents
+workspaces/*/
 index.md
 
 # Go binary

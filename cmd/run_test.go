@@ -482,14 +482,15 @@ func TestFilePromptLoader_Basic(t *testing.T) {
 
 func TestFilePromptLoader_WithAgentPrompt(t *testing.T) {
 	baseDir := t.TempDir()
-	os.MkdirAll(filepath.Join(baseDir, "prompts", "agents"), 0755)
+	os.MkdirAll(filepath.Join(baseDir, "prompts"), 0755)
+	os.MkdirAll(filepath.Join(baseDir, "agents"), 0755)
 	os.WriteFile(filepath.Join(baseDir, "prompts", "prompt.md"), []byte("Base prompt for {{WIGGUMS_DIR}}"), 0644)
-	os.WriteFile(filepath.Join(baseDir, "prompts", "agents", "explore.md"), []byte("# Explore Agent\nExplore instructions for {{WIGGUMS_DIR}}"), 0644)
+	os.WriteFile(filepath.Join(baseDir, "agents", "explore.md"), []byte("---\nAgent: explore\n---\n\n# Explore Agent\nExplore instructions for {{WIGGUMS_DIR}}"), 0644)
 
 	loader := &FilePromptLoader{}
 	tickets := []string{"/tmp/ticket1.md"}
 
-	result, err := loader.Load(baseDir, "prompts/prompt.md", "Remaining tickets:", tickets, "prompts/agents/explore.md")
+	result, err := loader.Load(baseDir, "prompts/prompt.md", "Remaining tickets:", tickets, "agents/explore.md")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,10 +498,13 @@ func TestFilePromptLoader_WithAgentPrompt(t *testing.T) {
 		t.Error("should contain base prompt")
 	}
 	if !strings.Contains(result, "# Explore Agent") {
-		t.Error("should contain agent prompt")
+		t.Error("should contain agent prompt body")
 	}
 	if !strings.Contains(result, "Explore instructions for "+baseDir) {
 		t.Error("agent prompt should have {{WIGGUMS_DIR}} substituted")
+	}
+	if strings.Contains(result, "Agent: explore") {
+		t.Error("frontmatter should be stripped from agent prompt")
 	}
 
 	// Verify order: base prompt, then agent prompt, then tickets
@@ -518,11 +522,120 @@ func TestFilePromptLoader_MissingAgentPromptSkipped(t *testing.T) {
 	os.WriteFile(filepath.Join(baseDir, "prompts", "prompt.md"), []byte("Base prompt"), 0644)
 
 	loader := &FilePromptLoader{}
-	result, err := loader.Load(baseDir, "prompts/prompt.md", "Remaining tickets:", []string{"/tmp/t.md"}, "prompts/agents/nonexistent.md")
+	result, err := loader.Load(baseDir, "prompts/prompt.md", "Remaining tickets:", []string{"/tmp/t.md"}, "agents/nonexistent.md")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result, "Base prompt") {
 		t.Error("should still contain base prompt")
+	}
+}
+
+// --- stripFrontmatter tests ---
+
+func TestStripFrontmatter(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			"with frontmatter",
+			"---\nAgent: explore\n---\n\n# Explore Agent\nDo stuff",
+			"# Explore Agent\nDo stuff",
+		},
+		{
+			"no frontmatter",
+			"# Just a prompt\nDo stuff",
+			"# Just a prompt\nDo stuff",
+		},
+		{
+			"empty body after frontmatter",
+			"---\nAgent: explore\n---\n",
+			"",
+		},
+		{
+			"frontmatter with extra whitespace",
+			"---\nAgent: explore\n---\n\n\n  Body here  \n",
+			"Body here",
+		},
+		{
+			"single delimiter only",
+			"---\nno closing delimiter",
+			"---\nno closing delimiter",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripFrontmatter(tt.content)
+			if got != tt.want {
+				t.Errorf("stripFrontmatter() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// --- Workspace tests ---
+
+func TestReadWorkspaceDirectory(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+	}{
+		{"with directory", "---\nDirectory: /home/user/project\n---\n", "/home/user/project"},
+		{"empty directory", "---\nDirectory:\n---\n", ""},
+		{"no directory field", "---\nStatus: created\n---\n", ""},
+		{"spaces in path", "---\nDirectory: /home/user/my project\n---\n", "/home/user/my project"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTicket(t, dir, "index.md", tt.content)
+			got, err := readWorkspaceDirectory(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestRunLoop_WorkspaceTicketsDir(t *testing.T) {
+	// Simulate a workspace: tickets in a subdirectory, not the default
+	dir := t.TempDir()
+	wsTicketsDir := filepath.Join(dir, "workspaces", "myproject", "tickets")
+	os.MkdirAll(wsTicketsDir, 0755)
+	writeTicket(t, wsTicketsDir, "ws-task.md", "---\nStatus: created\n---\nWorkspace task\n")
+
+	runner := &mockRunner{exitCode: 0}
+	loader := &mockPromptLoader{result: "workspace prompt"}
+
+	cfg := &loopConfig{
+		runner:       runner,
+		promptLoader: loader,
+		baseDir:      dir,
+		ticketsDir:   wsTicketsDir,
+		workDir:      "/tmp/fake-project",
+	}
+
+	err := runLoop(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 1 {
+		t.Fatalf("expected 1 runner call, got %d", len(runner.calls))
+	}
+	if len(loader.calls) != 1 {
+		t.Fatalf("expected 1 loader call, got %d", len(loader.calls))
+	}
+	// Verify the ticket from the workspace dir was found
+	if len(loader.calls[0].tickets) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(loader.calls[0].tickets))
+	}
+	if !strings.Contains(loader.calls[0].tickets[0], "ws-task.md") {
+		t.Errorf("expected ws-task.md ticket, got %s", loader.calls[0].tickets[0])
 	}
 }

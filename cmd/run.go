@@ -14,11 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var yolo bool
-
 func init() {
-	runCmd.Flags().BoolVar(&yolo, "yolo", false, "Use opus model and skip permissions")
-	runAgentCmd.Flags().BoolVar(&yolo, "yolo", false, "Use opus model and skip permissions")
 	runCmd.AddCommand(runAgentCmd)
 	rootCmd.AddCommand(runCmd)
 }
@@ -29,7 +25,7 @@ var runCmd = &cobra.Command{
 	Long:  "Runs an infinite loop finding incomplete tickets and piping prompts to Claude Code.\nExcludes tickets that have an Agent property set.",
 	Args:  cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return startLoop(args, "")
+		return startLoop(args, "", "", "")
 	},
 }
 
@@ -39,12 +35,13 @@ var runAgentCmd = &cobra.Command{
 	Long:  "Runs an infinite loop finding incomplete tickets that match the given agent name.",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return startLoop(args[1:], args[0])
+		return startLoop(args[1:], args[0], "", "")
 	},
 }
 
 // startLoop wires up real implementations and starts the main loop.
-func startLoop(args []string, agentFilter string) error {
+// ticketsDirOverride and workDir are optional; when empty, defaults are used.
+func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) error {
 	baseDir, err := resolveBaseDir()
 	if err != nil {
 		return fmt.Errorf("could not resolve base directory: %w", err)
@@ -57,13 +54,19 @@ func startLoop(args []string, agentFilter string) error {
 
 	os.Setenv("TERM", "xterm")
 
+	ticketsDir := filepath.Join(baseDir, "tickets")
+	if ticketsDirOverride != "" {
+		ticketsDir = ticketsDirOverride
+	}
+
 	cfg := &loopConfig{
-		runner:       &ClaudeRunner{},
+		runner:       &ClaudeRunner{WorkDir: workDir},
 		promptLoader: &FilePromptLoader{},
 		baseDir:      baseDir,
-		ticketsDir:   filepath.Join(baseDir, "tickets"),
+		ticketsDir:   ticketsDir,
 		claudeArgs:   claudeArgs,
 		agentFilter:  agentFilter,
+		workDir:      workDir,
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -98,7 +101,7 @@ func runLoop(ctx context.Context, cfg *loopConfig) error {
 		// Determine agent prompt file path (empty string if no agent)
 		agentPromptFile := ""
 		if cfg.agentFilter != "" {
-			agentPromptFile = filepath.Join("prompts", "agents", cfg.agentFilter+".md")
+			agentPromptFile = filepath.Join("agents", cfg.agentFilter+".md")
 		}
 
 		if len(unverified) > 0 {
