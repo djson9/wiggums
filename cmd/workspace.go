@@ -54,6 +54,12 @@ func runWorkspace(name string, claudeArgs []string) error {
 	ticketsDir := filepath.Join(wsDir, "tickets")
 	os.MkdirAll(ticketsDir, 0755)
 
+	// Create shortcuts.md if it doesn't exist
+	shortcutsPath := filepath.Join(wsDir, "shortcuts.md")
+	if _, err := os.Stat(shortcutsPath); os.IsNotExist(err) {
+		os.WriteFile(shortcutsPath, []byte("# Shortcuts - Iteration Learnings\n\nRecord workflow shortcuts and iteration learnings here.\n"), 0644)
+	}
+
 	fmt.Printf("Workspace: %s\n", name)
 	fmt.Printf("Working directory: %s\n", workDir)
 

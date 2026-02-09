@@ -16,6 +16,9 @@ if (name) {
 		content = content.replace("{{DIRECTORY}}", directory);
 		await app.vault.create(`${wsFolder}/index.md`, content);
 
+		// Create shortcuts file
+		await app.vault.create(`${wsFolder}/shortcuts.md`, "# Shortcuts - Iteration Learnings\n\nRecord workflow shortcuts and iteration learnings here.\n");
+
 		const datetime = tp.date.now("YYYY-MM-DD HH:mm");
 		tR += `${datetime} [[workspaces/${name}/index|${name}]]`;
 

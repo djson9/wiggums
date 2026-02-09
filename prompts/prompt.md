@@ -1,15 +1,10 @@
 # Wiggums
 
 This directory holds tickets that the user would like to work on.
-Please run `pwd` to understand what directory we are in.
 
 **Wiggums Directory:** `{{WIGGUMS_DIR}}`
 
-This directory contains:
-- `tickets/` - ticket files
-- `prompts/shortcuts.md` - iteration shortcuts
-
-The user is primarily working out of the parent directory, and this wiggums directory is just a repository for working on tickets.
+Your current working directory is the primary codebase you should be working in. The wiggums directory above is added as an additional directory — use it for reading/writing tickets and shortcuts, but do your actual code work in the current working directory.
 
 The remaining incomplete tickets are listed at the end of this prompt. Pick up the next one to work on.
 

@@ -51,6 +51,9 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 	if yolo {
 		claudeArgs = append([]string{"--model", "opus", "--dangerously-skip-permissions"}, claudeArgs...)
 	}
+	if workDir != "" {
+		claudeArgs = append([]string{"--add-dir", baseDir}, claudeArgs...)
+	}
 
 	os.Setenv("TERM", "xterm")
 
