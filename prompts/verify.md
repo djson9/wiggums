@@ -1,6 +1,11 @@
 # Verify
 
 ## Verifying Existing Tickets
+
+Please run "which md" then "md mcp servers ls".
+
+We should use MCPs (like playwright) and other md tools to verify e2e.
+
 The tickets requiring verification are listed at the end of this prompt. Please read each ticket file and determine:
 - Did the verification steps actually verify what the user asked for? Did we successfully test end to end? Here are examples of good and bad verification:
 Bad:  Verified only that dialog appears, not actually running the command
@@ -10,6 +15,8 @@ Bad: Verified only that the backend works, not that the frontend displays it
 Bad: Verified only that the command ran, not that the output changed
 Bad: Checked state once after action without comparing to state before  
 Good: Verifying that the state changed in the expected manner
+Good: Using playwright MCP to test UI interactions.
+BAD: Not testing UI interactions.
 Good: Running the command end to end
 Good: Capture TUI output after action
 Good: Verify specific text changed (e.g., ⏹ became ▶, 00:00 became 00:05)

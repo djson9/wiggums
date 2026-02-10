@@ -51,8 +51,12 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 	if yolo {
 		claudeArgs = append([]string{"--model", "opus", "--dangerously-skip-permissions"}, claudeArgs...)
 	}
+	runnerWorkDir := baseDir
 	if workDir != "" {
-		claudeArgs = append([]string{"--add-dir", workDir}, claudeArgs...)
+		// Use the workspace target as Claude's primary cwd so the shell
+		// doesn't reset back to the wiggums directory after every command.
+		runnerWorkDir = workDir
+		claudeArgs = append([]string{"--add-dir", baseDir}, claudeArgs...)
 	}
 
 	os.Setenv("TERM", "xterm")
@@ -68,8 +72,9 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 	}
 
 	cfg := &loopConfig{
-		runner:        &ClaudeRunner{WorkDir: baseDir},
+		runner:        &ClaudeRunner{WorkDir: runnerWorkDir},
 		promptLoader:  &FilePromptLoader{},
+		notifier:      &BeeepNotifier{},
 		baseDir:       baseDir,
 		ticketsDir:    ticketsDir,
 		claudeArgs:    claudeArgs,
@@ -130,6 +135,19 @@ func runLoop(ctx context.Context, cfg *loopConfig) error {
 				return err
 			}
 			if exitCode == 0 {
+				// Check if any verified tickets need more iterations
+				resetOccurred := checkAndResetIterations(unverified)
+				if resetOccurred {
+					fmt.Println("MinIterations not yet met after verification, continuing loop...")
+					continue
+				}
+				names := make([]string, len(unverified))
+				for i, f := range unverified {
+					names[i] = filepath.Base(f)
+				}
+				if cfg.notifier != nil {
+				_ = cfg.notifier.Notify("Wiggums: Ticket Verified", strings.Join(names, ", "), "")
+			}
 				return nil
 			}
 			fmt.Printf("Claude exited with code %d, retrying in 5s...\n", exitCode)
@@ -181,9 +199,13 @@ func runLoop(ctx context.Context, cfg *loopConfig) error {
 		}
 
 		// Check iteration thresholds and reset status if needed
-		checkAndResetIterations(remaining)
+		resetOccurred := checkAndResetIterations(remaining)
 
 		if exitCode == 0 {
+			if resetOccurred {
+				fmt.Println("MinIterations not yet met, continuing loop...")
+				continue
+			}
 			return nil
 		}
 		fmt.Printf("Claude exited with code %d, retrying in 5s...\n", exitCode)
@@ -453,7 +475,9 @@ func incrementCurIteration(path string) error {
 // checkAndResetIterations checks all tickets that were just worked on.
 // If a ticket has MinIterations set and CurIteration < MinIterations,
 // and its status is "completed", reset it to "in_progress".
-func checkAndResetIterations(tickets []string) {
+// Returns true if any ticket was reset (so the loop should continue).
+func checkAndResetIterations(tickets []string) bool {
+	anyReset := false
 	for _, path := range tickets {
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -493,7 +517,9 @@ func checkAndResetIterations(tickets []string) {
 		}
 		fmt.Printf("Ticket %s: iteration %d/%d, resetting status to in_progress\n", filepath.Base(path), curIter, minIter)
 		os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+		anyReset = true
 	}
+	return anyReset
 }
 
 // sleepWithContext sleeps for the given duration, returning an error if the

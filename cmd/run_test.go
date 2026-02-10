@@ -50,6 +50,15 @@ func (m *mockPromptLoader) Load(baseDir, promptFile, header string, tickets []st
 	return m.result, nil
 }
 
+type mockNotifier struct {
+	calls []string
+}
+
+func (m *mockNotifier) Notify(title, message, icon string) error {
+	m.calls = append(m.calls, title+": "+message)
+	return nil
+}
+
 // --- Helpers ---
 
 func writeTicket(t *testing.T, dir, name, content string) string {
@@ -371,6 +380,7 @@ func TestRunLoop_WorkPath(t *testing.T) {
 	cfg := &loopConfig{
 		runner:       runner,
 		promptLoader: loader,
+		notifier:     &mockNotifier{},
 		baseDir:      dir,
 		ticketsDir:   ticketsDir,
 	}
@@ -403,6 +413,7 @@ func TestRunLoop_VerifyPath(t *testing.T) {
 	cfg := &loopConfig{
 		runner:       runner,
 		promptLoader: loader,
+		notifier:     &mockNotifier{},
 		baseDir:      dir,
 		ticketsDir:   ticketsDir,
 	}
@@ -426,10 +437,12 @@ func TestRunLoop_IterationResetFlow(t *testing.T) {
 	ticketPath := writeTicket(t, ticketsDir, "iterating.md", "---\nStatus: created\nMinIterations: 3\n---\nWork\n")
 
 	runner := &mockRunner{exitCode: 0}
-	// Simulate claude marking ticket as completed during its run
+	// Simulate claude marking ticket as completed during each run
 	runner.onRun = func() {
 		content := readTicket(t, ticketPath)
+		// Replace any non-completed status with completed
 		content = strings.Replace(content, "Status: created", "Status: completed", 1)
+		content = strings.Replace(content, "Status: in_progress", "Status: completed", 1)
 		os.WriteFile(ticketPath, []byte(content), 0644)
 	}
 	loader := &mockPromptLoader{result: "work prompt"}
@@ -437,6 +450,7 @@ func TestRunLoop_IterationResetFlow(t *testing.T) {
 	cfg := &loopConfig{
 		runner:       runner,
 		promptLoader: loader,
+		notifier:     &mockNotifier{},
 		baseDir:      dir,
 		ticketsDir:   ticketsDir,
 	}
@@ -446,15 +460,21 @@ func TestRunLoop_IterationResetFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Loop should have continued until MinIterations was met
 	content := readTicket(t, ticketPath)
 	curIter := extractFrontmatterInt(content, "CurIteration")
-	if curIter != 1 {
-		t.Errorf("expected CurIteration=1, got %d", curIter)
+	if curIter != 3 {
+		t.Errorf("expected CurIteration=3 (MinIterations met), got %d", curIter)
 	}
 
 	status := extractFrontmatterStatus(content)
-	if !strings.Contains(strings.ToLower(status), "in_progress") {
-		t.Errorf("expected status reset to in_progress, got: %s", status)
+	if !strings.Contains(strings.ToLower(status), "completed") {
+		t.Errorf("expected status to stay completed after MinIterations met, got: %s", status)
+	}
+
+	// Should have been called 3 times (once per iteration)
+	if len(runner.calls) != 3 {
+		t.Errorf("expected 3 runner calls (one per iteration), got %d", len(runner.calls))
 	}
 }
 
@@ -590,6 +610,7 @@ func TestRunLoop_ShortcutsPathSubstitution_Default(t *testing.T) {
 	cfg := &loopConfig{
 		runner:        runner,
 		promptLoader:  loader,
+		notifier:      &mockNotifier{},
 		baseDir:       dir,
 		ticketsDir:    ticketsDir,
 		shortcutsFile: shortcutsFile,
@@ -623,6 +644,7 @@ func TestRunLoop_ShortcutsPathSubstitution_Workspace(t *testing.T) {
 	cfg := &loopConfig{
 		runner:        runner,
 		promptLoader:  loader,
+		notifier:      &mockNotifier{},
 		baseDir:       dir,
 		ticketsDir:    wsTicketsDir,
 		shortcutsFile: shortcutsFile,
@@ -651,6 +673,7 @@ func TestRunLoop_ShortcutsPathSubstitution_Verify(t *testing.T) {
 	cfg := &loopConfig{
 		runner:        runner,
 		promptLoader:  loader,
+		notifier:      &mockNotifier{},
 		baseDir:       dir,
 		ticketsDir:    ticketsDir,
 		shortcutsFile: shortcutsFile,
@@ -709,6 +732,7 @@ func TestRunLoop_WorkspaceTicketsDir(t *testing.T) {
 	cfg := &loopConfig{
 		runner:       runner,
 		promptLoader: loader,
+		notifier:     &mockNotifier{},
 		baseDir:      dir,
 		ticketsDir:   wsTicketsDir,
 		workDir:      "/tmp/fake-project",

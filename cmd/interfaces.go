@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/gen2brain/beeep"
 )
 
 // Runner abstracts the execution of claude (or any command) with a prompt.
@@ -19,14 +21,20 @@ type PromptLoader interface {
 	Load(baseDir, promptFile, header string, tickets []string, agentPromptFile string) (string, error)
 }
 
+// Notifier abstracts desktop notifications so tests don't trigger real alerts.
+type Notifier interface {
+	Notify(title, message, icon string) error
+}
+
 // loopConfig holds all dependencies and parameters for the main loop.
 type loopConfig struct {
-	runner       Runner
-	promptLoader PromptLoader
-	baseDir      string
-	ticketsDir   string
-	claudeArgs   []string
-	agentFilter  string
+	runner        Runner
+	promptLoader  PromptLoader
+	notifier      Notifier
+	baseDir       string
+	ticketsDir    string
+	claudeArgs    []string
+	agentFilter   string
 	workDir       string // external working directory for claude (e.g., workspace target repo)
 	shortcutsFile string // absolute path to the workspace's shortcuts.md
 }
@@ -93,6 +101,13 @@ func (f *FilePromptLoader) Load(baseDir, promptFile, header string, tickets []st
 	}
 
 	return b.String(), nil
+}
+
+// BeeepNotifier is the real Notifier that sends desktop notifications via beeep.
+type BeeepNotifier struct{}
+
+func (b *BeeepNotifier) Notify(title, message, icon string) error {
+	return beeep.Notify(title, message, icon)
 }
 
 // stripFrontmatter removes YAML frontmatter (between --- delimiters) from content.
