@@ -53,10 +53,7 @@ func startLoop(args []string, agentFilter, ticketsDirOverride, workDir string) e
 	}
 	runnerWorkDir := baseDir
 	if workDir != "" {
-		// Use the workspace target as Claude's primary cwd so the shell
-		// doesn't reset back to the wiggums directory after every command.
-		runnerWorkDir = workDir
-		claudeArgs = append([]string{"--add-dir", baseDir}, claudeArgs...)
+		claudeArgs = append([]string{"--add-dir", workDir}, claudeArgs...)
 	}
 
 	os.Setenv("TERM", "xterm")
