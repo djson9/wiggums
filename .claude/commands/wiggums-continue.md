@@ -1,0 +1,1 @@
+The user is done interacting. The Wiggums loop is resuming control. Please continue working with the understanding that this process will terminate when you stop.

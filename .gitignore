@@ -10,5 +10,8 @@ ticket_drafts/
 workspaces/*/
 index.md
 
+# Runtime state
+.state/
+
 # Go binary
 /wiggums

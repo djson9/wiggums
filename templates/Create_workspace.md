@@ -9,6 +9,7 @@ if (name) {
 		await app.vault.createFolder(wsFolder).catch(() => {});
 		await app.vault.createFolder(`${wsFolder}/tickets`).catch(() => {});
 		await app.vault.createFolder(`${wsFolder}/ticket_drafts`).catch(() => {});
+		await app.vault.createFolder(`${wsFolder}/prompts`).catch(() => {});
 
 		// Create workspace index from template with Directory filled in
 		const template = tp.file.find_tfile("workspace_index.sample");

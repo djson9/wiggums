@@ -6,11 +6,16 @@ This directory holds tickets that the user would like to work on.
 
 Your current working directory is the wiggums directory — it contains tickets, prompts, and `.claude` settings. The project codebase is added via `--add-dir` and is where you should do your actual code work. Use `{{WIGGUMS_DIR}}` paths for ticket and prompt operations.
 
-The remaining incomplete tickets are listed at the end of this prompt. Pick up the next one to work on.
+Your assigned ticket is listed at the end of this prompt. Work on ONLY that ticket.
+
+Please include steps of how you were able to reach findings section in ticket.
 
 ## How to Work in This Repo
-Pick up the next ticket. Only work on tickets in the tickets/ folder.
-Select JUST one ticket to work on. Please pick the ticket that will help most with the remaining work. Do not complete more than one uncompleted ticket. Do not pick up extra uncomplete tickets. Do not remove tickets.
+Work on ONLY the ticket listed at the end of this prompt. Do not browse the tickets/ directory for additional tickets to work on. Do not pick up extra tickets. Do not remove tickets.
+
+Please document key decisions and key findings in the ticket as you work. Please update the ticket periodically as you work, not all at the end.
+
+Do not update any fields in the YAML front matter besides status. The infra will update those.
 
 Please include execution plan WITHIN the ticket.
 
@@ -27,7 +32,7 @@ To reference other tickets.
 
 ## Beginning the Ticket
 
-IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find tickets that may be related to this one, and read the relevant issues.
+IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find tickets that may be related to this one, and read the relevant issues. Be skeptical of the conclusions given by the explore agent, because it sometimes does not return the full context. Use explore agent mostly to find files, but do not trust it's conclusions and read the files yourself.
 
 To understand the state of the repo, try running `git diff master...`
 

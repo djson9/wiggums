@@ -35,8 +35,10 @@ type loopConfig struct {
 	ticketsDir    string
 	claudeArgs    []string
 	agentFilter   string
+	ticketFilter  string // substring match on ticket filename
 	workDir       string // external working directory for claude (e.g., workspace target repo)
 	shortcutsFile string // absolute path to the workspace's shortcuts.md
+	workspaceName string // name of the workspace being processed
 }
 
 // ClaudeRunner is the real Runner implementation that shells out to the claude CLI.
@@ -54,6 +56,14 @@ func (c *ClaudeRunner) Run(ctx context.Context, prompt string, args []string) (i
 	}
 
 	err := cmd.Run()
+
+	// Restore terminal state after subprocess exit. Claude CLI puts the
+	// terminal in raw mode; if it exits without restoring, Ctrl+C stops
+	// generating SIGINT. stty sane is a no-op on an already-sane terminal.
+	sane := exec.Command("stty", "sane")
+	sane.Stdin = os.Stdin
+	_ = sane.Run()
+
 	if err == nil {
 		return 0, nil
 	}

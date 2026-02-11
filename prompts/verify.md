@@ -30,6 +30,8 @@ Good: Verify specific text changed (e.g., ⏹ became ▶, 00:00 became 00:05)
 
 If a ticket looks properly verified, update the status to "completed + verified", so that it no longer matches our grep. Add notes if you made any additional verification.
 
+If the ticket needs more implementation work, please set the ticket back to `in_progress`.
+
 If we make any code changes, do NOT update the status. Instead, add repro steps to exactly verify the results. Another agent will come after you and perform the repro steps, and will update the status if they are able to repro.
 
 Please look and work on at ONLY ONE ticket at a time. We should modify at MOST one ticket at a time.

@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "kill -9 $PPID"
+            "command": "/Users/davidson/workspace/wiggums/.claude/hooks/conditional-stop.sh"
           }
         ]
       }

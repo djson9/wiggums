@@ -9,22 +9,54 @@ import (
 )
 
 var yolo bool
+var agentFlag string
+var ticketFlag string
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&yolo, "yolo", true, "Use opus model and skip permissions")
+	rootCmd.PersistentFlags().StringVar(&agentFlag, "agent", "", "Only process tickets matching this agent name")
+	rootCmd.PersistentFlags().StringVar(&ticketFlag, "ticket", "", "Only process this specific ticket (substring match on filename)")
 	rootCmd.AddCommand(lsCmd)
 }
 
 var rootCmd = &cobra.Command{
-	Use:   "wiggums [workspace]",
-	Short: "Ticket automation loop powered by Claude Code",
-	Args:  cobra.ArbitraryArgs,
+	Use:               "wiggums [workspace]",
+	Short:             "Ticket automation loop powered by Claude Code",
+	Args:              cobra.ArbitraryArgs,
+	ValidArgsFunction: completeWorkspaces,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if len(args) == 0 {
 			return cmd.Help()
 		}
 		return runWorkspace(args[0], args[1:])
 	},
+}
+
+func completeWorkspaces(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	baseDir, err := resolveBaseDir()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	wsRoot := filepath.Join(baseDir, "workspaces")
+	entries, err := os.ReadDir(wsRoot)
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	var names []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		indexPath := filepath.Join(wsRoot, e.Name(), "index.md")
+		if _, err := os.Stat(indexPath); err != nil {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
 var lsCmd = &cobra.Command{

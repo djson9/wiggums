@@ -15,11 +15,12 @@ func init() {
 }
 
 var workspaceCmd = &cobra.Command{
-	Use:     "workspace [name] [-- claude args...]",
-	Aliases: []string{"w"},
-	Short:   "Run the ticket loop for a workspace",
-	Long:    "Runs the ticket processing loop scoped to a workspace's tickets directory,\nwith claude working in the workspace's configured external directory.",
-	Args:    cobra.MinimumNArgs(1),
+	Use:               "workspace [name] [-- claude args...]",
+	Aliases:           []string{"w"},
+	Short:             "Run the ticket loop for a workspace",
+	Long:              "Runs the ticket processing loop scoped to a workspace's tickets directory,\nwith claude working in the workspace's configured external directory.",
+	Args:              cobra.MinimumNArgs(1),
+	ValidArgsFunction: completeWorkspaces,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runWorkspace(args[0], args[1:])
 	},
@@ -60,10 +61,15 @@ func runWorkspace(name string, claudeArgs []string) error {
 		os.WriteFile(shortcutsPath, []byte("# Shortcuts - Iteration Learnings\n\nRecord workflow shortcuts and iteration learnings here.\n"), 0644)
 	}
 
+	// Create prompts/ directory for workspace-scoped prompts.
+	// Users can add prompt.md and/or verify.md here to append to root prompts.
+	promptsDir := filepath.Join(wsDir, "prompts")
+	os.MkdirAll(promptsDir, 0755)
+
 	fmt.Printf("Workspace: %s\n", name)
 	fmt.Printf("Working directory: %s\n", workDir)
 
-	return startLoop(claudeArgs, "", ticketsDir, workDir)
+	return startLoop(claudeArgs, agentFlag, ticketsDir, workDir, name)
 }
 
 // readWorkspaceDirectory reads the Directory field from a workspace index.md frontmatter.
