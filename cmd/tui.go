@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -32,10 +33,12 @@ var docStyle = lipgloss.NewStyle().Margin(1, 2)
 var activeTabStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57"))
 var inactiveTabStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
-// queueDelegate wraps DefaultDelegate to color the currently-working item in yellow.
+// queueDelegate wraps DefaultDelegate to color the currently-working item in yellow
+// and unread items in subtle green.
 type queueDelegate struct {
 	list.DefaultDelegate
 	currentStyles list.DefaultItemStyles
+	unreadStyles  list.DefaultItemStyles
 }
 
 // newQueueDelegate creates a delegate that highlights the current working item in yellow.
@@ -63,13 +66,40 @@ func newQueueDelegate() queueDelegate {
 	cs.DimmedDesc = d.Styles.DimmedDesc
 	cs.FilterMatch = d.Styles.FilterMatch
 
-	return queueDelegate{DefaultDelegate: d, currentStyles: cs}
+	// Subtle green styles for unread items
+	us := list.NewDefaultItemStyles()
+	us.NormalTitle = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("114")).
+		Padding(0, 0, 0, 2)
+	us.NormalDesc = lipgloss.NewStyle().
+		Foreground(lipgloss.Color("114")).
+		Padding(0, 0, 0, 2)
+	us.SelectedTitle = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("114")).
+		Foreground(lipgloss.Color("114")).
+		Padding(0, 0, 0, 1)
+	us.SelectedDesc = lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder(), false, false, false, true).
+		BorderForeground(lipgloss.Color("114")).
+		Foreground(lipgloss.Color("114")).
+		Padding(0, 0, 0, 1)
+	us.DimmedTitle = d.Styles.DimmedTitle
+	us.DimmedDesc = d.Styles.DimmedDesc
+	us.FilterMatch = d.Styles.FilterMatch
+
+	return queueDelegate{DefaultDelegate: d, currentStyles: cs, unreadStyles: us}
 }
 
-// Render overrides DefaultDelegate.Render to apply yellow styling for the current item.
+// Render overrides DefaultDelegate.Render to apply yellow styling for the current item
+// and subtle green for unread items.
 func (d queueDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
-	if ti, ok := item.(tuiTicketItem); ok && ti.current {
-		d.Styles = d.currentStyles
+	if ti, ok := item.(tuiTicketItem); ok {
+		if ti.current {
+			d.Styles = d.currentStyles
+		} else if ti.unread {
+			d.Styles = d.unreadStyles
+		}
 	}
 	d.DefaultDelegate.Render(w, m, index, item)
 }
@@ -88,18 +118,21 @@ type tuiTicketItem struct {
 	filename         string
 	title            string
 	status           string
-	filePath         string    // absolute path to the ticket file
-	skipVerification bool      // SkipVerification frontmatter value
-	minIterations    int       // MinIterations frontmatter value
-	createdAt        time.Time // parsed from epoch prefix in filename
-	selected         bool      // whether the ticket is selected for the queue
-	current          bool      // whether this is the currently processing ticket in the queue
-	workerStatus     string        // worker-reported status: "pending", "working", "completed", "failed"
+	filePath         string        // absolute path to the ticket file
+	skipVerification bool          // SkipVerification frontmatter value
+	minIterations    int           // MinIterations frontmatter value
+	createdAt        time.Time     // parsed from epoch prefix in filename
+	selected         bool          // whether the ticket is selected for the queue
+	current          bool          // whether this is the currently processing ticket in the queue
+	workerStatus     string        // worker-reported status: "pending", "working", "completed"
 	requestNum       int           // 0 = original ticket, 1+ = additional user request #N
 	isDraft          bool          // draft requests are visible but not actionable until activated
 	runDuration      time.Duration // total processing time from ticket_runs
 	workStartedAt    time.Time     // when the worker started processing this ticket (from queue file)
 	comment          string        // short user comment (max 50 chars) displayed in description
+	unread           bool          // true when ticket completed but user hasn't pressed 'o' yet
+	preprocessPrompt string        // preprocessing instruction for this ticket
+	preprocessStatus string        // "pending", "in_progress", "completed"
 }
 
 func (t tuiTicketItem) Title() string {
@@ -136,7 +169,23 @@ func (t tuiTicketItem) Title() string {
 	if t.isDraft {
 		icon = "✎"
 	}
-	return fmt.Sprintf("%s%s %s%s", prefix, icon, displayTitle, suffix)
+	unreadMarker := ""
+	if t.unread {
+		unreadMarker = "*"
+	}
+	// Preprocessing status indicator (only show if a prompt is set)
+	ppIndicator := ""
+	if t.preprocessPrompt != "" {
+		switch t.preprocessStatus {
+		case "pending":
+			ppIndicator = " pp"
+		case "in_progress":
+			ppIndicator = " pp..."
+		case "completed":
+			ppIndicator = " pp:✓"
+		}
+	}
+	return fmt.Sprintf("%s%s%s %s%s%s", prefix, icon, unreadMarker, displayTitle, suffix, ppIndicator)
 }
 
 func (t tuiTicketItem) Description() string {
@@ -144,7 +193,10 @@ func (t tuiTicketItem) Description() string {
 	if !t.createdAt.IsZero() {
 		desc += fmt.Sprintf(" | %s", t.createdAt.Format("1/2 3:04PM"))
 	}
-	if t.runDuration > 0 {
+	if t.workerStatus == "working" && !t.workStartedAt.IsZero() {
+		elapsed := time.Since(t.workStartedAt)
+		desc += fmt.Sprintf(" | %s", formatDurationSeconds(elapsed))
+	} else if t.runDuration > 0 {
 		desc += fmt.Sprintf(" | %s", formatDuration(t.runDuration))
 	}
 	if t.requestNum > 0 {
@@ -164,6 +216,31 @@ func (t tuiTicketItem) Description() string {
 		desc += " | " + t.comment
 	}
 	return desc
+}
+
+// formatDurationSeconds formats a duration with second precision like "1m30s", "45s", "2h5m".
+// Used for actively-working tickets where second-level granularity is useful.
+func formatDurationSeconds(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	if h > 0 && m > 0 {
+		return fmt.Sprintf("%dh%dm", h, m)
+	}
+	if h > 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	if m > 0 && s > 0 {
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm", m)
+	}
+	if s > 0 {
+		return fmt.Sprintf("%ds", s)
+	}
+	return "0s"
 }
 
 // formatDuration formats a duration as a compact human-readable string like "30m", "1h30m", "2h".
@@ -196,22 +273,24 @@ func (t tuiTicketItem) FilterValue() string {
 type tuiMode int
 
 const (
-	tuiModeList                   tuiMode = iota // browsing the ticket list
-	tuiModeMinIterInput                          // entering MinIterations value
-	tuiModeNewTicketWorkspace                    // wizard step 1: choose workspace
-	tuiModeNewTicketName                         // wizard step 2: enter ticket name
-	tuiModeNewTicketInstructions                 // wizard step 3: enter instructions
-	tuiModeAdditionalContext                     // entering additional context for a ticket
-	tuiModeHelp                                  // showing help overlay
-	tuiModeRenameQueue                           // renaming the work queue
-	tuiModeQueuePrompt                           // editing the queue prompt
-	tuiModeViewShortcuts                         // viewing queue shortcuts
-	tuiModeQueuePicker                           // picking/creating a queue
-	tuiModeNewQueueName                          // entering name for new queue
-	tuiModeConfirmRemove                         // confirming removal from queue
-	tuiModeConfirmReset                          // confirming ticket reset
-	tuiModeConfirmActivate                       // confirming draft activation
-	tuiModeComment                               // entering a comment for a ticket
+	tuiModeList                  tuiMode = iota // browsing the ticket list
+	tuiModeMinIterInput                         // entering MinIterations value
+	tuiModeNewTicketWorkspace                   // wizard step 1: choose workspace
+	tuiModeNewTicketName                        // wizard step 2: enter ticket name
+	tuiModeNewTicketInstructions                // wizard step 3: enter instructions
+	tuiModeAdditionalContext                    // entering additional context for a ticket
+	tuiModeHelp                                 // showing help overlay
+	tuiModeRenameQueue                          // renaming the work queue
+	tuiModeQueuePrompt                          // editing the queue prompt
+	tuiModeViewShortcuts                        // viewing queue shortcuts
+	tuiModeQueuePicker                          // picking/creating a queue
+	tuiModeNewQueueName                         // entering name for new queue
+	tuiModeConfirmRemove                        // confirming removal from queue
+	tuiModeConfirmReset                         // confirming ticket reset
+	tuiModeConfirmActivate                      // confirming draft activation
+	tuiModeConfirmDeleteQueue                   // confirming queue deletion
+	tuiModeComment                              // entering a comment for a ticket
+	tuiModePreprocessPrompt                     // entering preprocessing instruction
 )
 
 // tuiQueueItem implements list.Item for display in the queue picker list.
@@ -219,10 +298,10 @@ type tuiQueueItem struct {
 	id          string // queue file ID (e.g. "default", "my-queue")
 	name        string // display name from QueueFile.Name
 	pinned      bool
-	pinOrder    int    // ordering of pinned queues (lower = first)
-	ticketCount int    // number of tickets in the queue
-	running     bool   // whether the queue is currently running
-	active      bool   // whether this is the currently loaded queue
+	pinOrder    int  // ordering of pinned queues (lower = first)
+	ticketCount int  // number of tickets in the queue
+	running     bool // whether the queue is currently running
+	active      bool // whether this is the currently loaded queue
 }
 
 func (q tuiQueueItem) Title() string {
@@ -262,7 +341,7 @@ type pinnedQueue struct {
 // maxPinnedQueues is the maximum number of queues that can be pinned.
 const maxPinnedQueues = 5
 
-// countRemainingTickets returns the number of tickets that are not completed, failed, or drafts.
+// countRemainingTickets returns the number of tickets that are not completed or drafts.
 func countRemainingTickets(tickets []QueueTicket) int {
 	var remaining int
 	for _, t := range tickets {
@@ -270,7 +349,7 @@ func countRemainingTickets(tickets []QueueTicket) int {
 			continue
 		}
 		switch t.Status {
-		case "completed", "failed":
+		case "completed":
 			// done
 		default:
 			remaining++
@@ -477,29 +556,31 @@ type newTicketState struct {
 
 // tuiModel is the Bubble Tea model for the wiggums TUI.
 type tuiModel struct {
-	list      list.Model
-	baseDir   string
-	mode      tuiMode
-	tab       tuiTab     // active tab
-	queue     list.Model // queue tab list
-	queueName       string   // display name for the queue
-	queuePrompt     string   // prompt injected into all queue tickets
-	queueShortcuts  []string // shortcuts memory injected into queue context
-	queueRunning    bool     // whether the queue is actively processing
-	currentQueueIdx int      // index of the ticket currently being processed (-1 = none)
-	workerLost      bool     // true if worker heartbeat is stale (>30s)
-	activeQueueID   string         // ID of the active queue (default: "default")
-	pinnedQueues    []pinnedQueue  // cached pinned queues for tab bar (max 5)
-	queuePickerList list.Model // queue picker list (populated lazily on Q press)
-	textInput          textinput.Model
-	textArea           textarea.Model
-	newTicket          newTicketState
-	pendingRemovePath       string // filePath of ticket pending removal confirmation
-	pendingRemoveRequestNum int    // requestNum of ticket pending removal confirmation
-	pendingResetPath   string // filePath of ticket pending reset confirmation
+	list                      list.Model
+	baseDir                   string
+	mode                      tuiMode
+	tab                       tuiTab        // active tab
+	queue                     list.Model    // queue tab list
+	queueName                 string        // display name for the queue
+	queuePrompt               string        // prompt injected into all queue tickets
+	queueShortcuts            []string      // shortcuts memory injected into queue context
+	queueRunning              bool          // whether the queue is actively processing
+	currentQueueIdx           int           // index of the ticket currently being processed (-1 = none)
+	workerLost                bool          // true if worker heartbeat is stale (>30s)
+	activeQueueID             string        // ID of the active queue (default: "default")
+	pinnedQueues              []pinnedQueue // cached pinned queues for tab bar (max 5)
+	queuePickerList           list.Model    // queue picker list (populated lazily on Q press)
+	textInput                 textinput.Model
+	textArea                  textarea.Model
+	newTicket                 newTicketState
+	pendingRemovePath         string // filePath of ticket pending removal confirmation
+	pendingRemoveRequestNum   int    // requestNum of ticket pending removal confirmation
+	pendingResetPath          string // filePath of ticket pending reset confirmation
 	pendingActivatePath       string // filePath of draft pending activation
 	pendingActivateRequestNum int    // requestNum of draft pending activation
-	renameQueueID      string // queue ID being renamed (set when entering rename from picker)
+	pendingDeleteQueueID      string // queue ID pending deletion confirmation
+	renameQueueID             string // queue ID being renamed (set when entering rename from picker)
+	defaultPreprocessPrompt   string // last-used preprocessing prompt for quick reuse
 }
 
 func newTuiModel(baseDir string) (tuiModel, error) {
@@ -568,6 +649,7 @@ func (m *tuiModel) restoreQueueState() {
 	}
 	m.queuePrompt = qf.Prompt
 	m.queueShortcuts = qf.Shortcuts
+	m.defaultPreprocessPrompt = qf.DefaultPreprocessPrompt
 
 	// Build a map of all loaded tickets by filePath:requestNum for fast lookup
 	allItems := m.list.Items()
@@ -586,13 +668,26 @@ func (m *tuiModel) restoreQueueState() {
 			item := allItems[idx].(tuiTicketItem)
 			item.selected = true
 			item.workerStatus = qt.Status
+			if item.requestNum > 0 {
+				// Normalize additional-request status from queue state immediately
+				// during restore so start/stop actions don't persist stale DB values.
+				if mapped := mapQueueStatusToAdditionalRequestStatus(qt.Status); mapped != "" && item.status != mapped {
+					item.status = mapped
+					if database.DB != nil {
+						_ = database.UpdateAdditionalRequestStatus(context.Background(), item.filePath, item.requestNum, mapped)
+					}
+				}
+			}
 			item.isDraft = qt.IsDraft
+			item.unread = qt.Unread
 			if qt.StartedAt > 0 {
 				item.workStartedAt = time.Unix(qt.StartedAt, 0)
 			}
 			if qt.Comment != "" {
 				item.comment = qt.Comment
 			}
+			item.preprocessPrompt = qt.PreprocessPrompt
+			item.preprocessStatus = qt.PreprocessStatus
 			queueItems = append(queueItems, item)
 			// Mark selected in the all-tickets list too
 			allItems[idx] = item
@@ -604,13 +699,7 @@ func (m *tuiModel) restoreQueueState() {
 	// Restore running state only if there are actual queue items
 	if len(queueItems) > 0 {
 		m.queueRunning = qf.Running
-		m.currentQueueIdx = qf.CurrentIndex
-		// Cap currentQueueIdx to the restored queue size. Some queue file
-		// tickets may not have matched loaded tickets (deleted/moved files),
-		// so the restored queue could be shorter than the queue file expected.
-		if m.currentQueueIdx >= len(queueItems) {
-			m.currentQueueIdx = len(queueItems) - 1
-		}
+		m.currentQueueIdx = m.computeCurrentQueueIdx()
 		if m.queueRunning {
 			m.syncQueueCurrentMarker()
 		}
@@ -878,27 +967,30 @@ func appendAdditionalContext(path string, text string, createItem bool, isDraft 
 
 // QueueTicket represents a ticket in the persisted queue file.
 type QueueTicket struct {
-	Path       string `json:"path"`
-	Workspace  string `json:"workspace"`
-	Status     string `json:"status"`                // "pending", "working", "completed", "failed"
-	RequestNum int    `json:"request_num,omitempty"`  // 0 = original ticket, 1+ = additional request #N
-	IsDraft    bool   `json:"is_draft,omitempty"`     // draft items are skipped by the worker
-	StartedAt  int64  `json:"started_at,omitempty"`   // Unix timestamp when worker started processing
-	Comment    string `json:"comment,omitempty"`      // short user comment (max 50 chars)
+	Path              string `json:"path"`
+	Workspace         string `json:"workspace"`
+	Status            string `json:"status"`                      // "pending", "working", "completed"
+	RequestNum        int    `json:"request_num,omitempty"`       // 0 = original ticket, 1+ = additional request #N
+	IsDraft           bool   `json:"is_draft,omitempty"`          // draft items are skipped by the worker
+	StartedAt         int64  `json:"started_at,omitempty"`        // Unix timestamp when worker started processing
+	Comment           string `json:"comment,omitempty"`           // short user comment (max 50 chars)
+	Unread            bool   `json:"unread,omitempty"`            // true when completed but user hasn't pressed 'o' yet
+	PreprocessPrompt  string `json:"preprocess_prompt,omitempty"` // preprocessing instruction for this ticket
+	PreprocessStatus  string `json:"preprocess_status,omitempty"` // "pending", "in_progress", "completed"
 }
 
 // QueueFile is the JSON structure persisted to ~/.wiggums/queue.json.
 type QueueFile struct {
-	Name          string        `json:"name"`
-	Prompt        string        `json:"prompt,omitempty"`
-	Shortcuts     []string      `json:"shortcuts,omitempty"`
-	Tickets       []QueueTicket `json:"tickets"`
-	Running       bool          `json:"running"`
-	CurrentIndex  int           `json:"current_index"`
-	LastHeartbeat int64         `json:"last_heartbeat,omitempty"` // Unix timestamp of last worker heartbeat
-	WorkerPID     int           `json:"worker_pid,omitempty"`     // PID of the worker process for liveness checks
-	Pinned        bool          `json:"pinned,omitempty"`         // Whether the queue is pinned to the top of the picker
-	PinOrder      int           `json:"pin_order,omitempty"`      // Ordering of pinned queues (lower = first, 0 = unset)
+	Name                    string        `json:"name"`
+	Prompt                  string        `json:"prompt,omitempty"`
+	Shortcuts               []string      `json:"shortcuts,omitempty"`
+	Tickets                 []QueueTicket `json:"tickets"`
+	Running                 bool          `json:"running"`
+	LastHeartbeat           int64         `json:"last_heartbeat,omitempty"`            // Unix timestamp of last worker heartbeat
+	WorkerPID               int           `json:"worker_pid,omitempty"`                // PID of the worker process for liveness checks
+	Pinned                  bool          `json:"pinned,omitempty"`                    // Whether the queue is pinned to the top of the picker
+	PinOrder                int           `json:"pin_order,omitempty"`                 // Ordering of pinned queues (lower = first, 0 = unset)
+	DefaultPreprocessPrompt string        `json:"default_preprocess_prompt,omitempty"` // last-used preprocessing prompt for quick reuse
 }
 
 // queueFilePath returns the path to the default queue file.
@@ -984,11 +1076,11 @@ func migrateQueueFile() {
 // buildQueueFileFromModel creates a QueueFile struct from the current TUI model state.
 func buildQueueFileFromModel(m *tuiModel) QueueFile {
 	qf := QueueFile{
-		Name:         m.queueName,
-		Prompt:       m.queuePrompt,
-		Shortcuts:    m.queueShortcuts,
-		Running:      m.queueRunning,
-		CurrentIndex: m.currentQueueIdx,
+		Name:                    m.queueName,
+		Prompt:                  m.queuePrompt,
+		Shortcuts:               m.queueShortcuts,
+		Running:                 m.queueRunning,
+		DefaultPreprocessPrompt: m.defaultPreprocessPrompt,
 	}
 
 	for i, qi := range m.queue.Items() {
@@ -1008,7 +1100,7 @@ func buildQueueFileFromModel(m *tuiModel) QueueFile {
 				status = "pending"
 				// Only mark the current item as "working" based on position.
 				// Do NOT mark items before currentQueueIdx as "completed" by position —
-				// the worker sets completed/failed statuses explicitly. Position-based
+				// the worker sets completed statuses explicitly. Position-based
 				// "completed" is wrong after reordering (unprocessed tickets moved
 				// before the current position get incorrectly marked as completed).
 				if m.queueRunning && i == m.currentQueueIdx {
@@ -1021,25 +1113,26 @@ func buildQueueFileFromModel(m *tuiModel) QueueFile {
 			startedAt = item.workStartedAt.Unix()
 		}
 		qf.Tickets = append(qf.Tickets, QueueTicket{
-			Path:       item.filePath,
-			Workspace:  item.workspace,
-			Status:     status,
-			RequestNum: item.requestNum,
-			IsDraft:    item.isDraft,
-			StartedAt:  startedAt,
-			Comment:    item.comment,
+			Path:             item.filePath,
+			Workspace:        item.workspace,
+			Status:           status,
+			RequestNum:       item.requestNum,
+			IsDraft:          item.isDraft,
+			StartedAt:        startedAt,
+			Comment:          item.comment,
+			Unread:           item.unread,
+			PreprocessPrompt: item.preprocessPrompt,
+			PreprocessStatus: item.preprocessStatus,
 		})
 	}
 
 	return qf
 }
 
-// mergeWorkerStatuses preserves worker-set terminal statuses ("completed"/"failed")
-// from the existing queue file when the model would write "working". This prevents
-// a race condition where the TUI writes the queue file between a worker completion
-// and the next 2-second sync poll, clobbering the worker's status back to "working".
-// Only "working" is overridden — "pending" is not, since it may represent an
-// intentional queue restart.
+// mergeWorkerStatuses preserves the worker's "completed" status from the existing
+// queue file. This prevents a race condition where the TUI writes the queue file
+// between a worker completion and the next 2-second sync poll, clobbering the
+// worker's "completed" back to "pending" or "working".
 func mergeWorkerStatuses(qf *QueueFile, existing *QueueFile) {
 	if existing == nil {
 		return
@@ -1052,8 +1145,39 @@ func mergeWorkerStatuses(qf *QueueFile, existing *QueueFile) {
 	for i, qt := range qf.Tickets {
 		key := additionalRequestKey(qt.Path, qt.RequestNum)
 		if existingStatus, ok := existingStatusMap[key]; ok {
-			if (existingStatus == "completed" || existingStatus == "failed") && qt.Status == "working" {
+			if existingStatus == "completed" && qt.Status != "completed" {
 				qf.Tickets[i].Status = existingStatus
+			}
+		}
+	}
+}
+
+// mergePreprocessStatuses preserves the preprocessing worker's status updates
+// from the existing queue file. Prevents the TUI from clobbering "in_progress"
+// or "completed" back to "pending" during a sync cycle.
+func mergePreprocessStatuses(qf *QueueFile, existing *QueueFile) {
+	if existing == nil {
+		return
+	}
+	existingMap := make(map[string]string)
+	for _, et := range existing.Tickets {
+		key := additionalRequestKey(et.Path, et.RequestNum)
+		existingMap[key] = et.PreprocessStatus
+	}
+	for i, qt := range qf.Tickets {
+		key := additionalRequestKey(qt.Path, qt.RequestNum)
+		if existingStatus, ok := existingMap[key]; ok {
+			// Only preserve worker's progress if the ticket still has a prompt set.
+			// If the prompt was cleared, don't carry over stale status.
+			if qt.PreprocessPrompt == "" {
+				continue
+			}
+			// Preserve worker's progress: in_progress beats pending, completed beats all
+			if existingStatus == "in_progress" && qt.PreprocessStatus == "pending" {
+				qf.Tickets[i].PreprocessStatus = existingStatus
+			}
+			if existingStatus == "completed" {
+				qf.Tickets[i].PreprocessStatus = existingStatus
 			}
 		}
 	}
@@ -1077,6 +1201,7 @@ func (m *tuiModel) writeQueueFile() error {
 		qf.Pinned = existing.Pinned
 		qf.PinOrder = existing.PinOrder
 		mergeWorkerStatuses(&qf, existing)
+		mergePreprocessStatuses(&qf, existing)
 	}
 	return writeQueueFileDataToPath(&qf, path)
 }
@@ -1115,6 +1240,7 @@ func writeQueueFileToPath(m *tuiModel, path string) error {
 		qf.Pinned = existing.Pinned
 		qf.PinOrder = existing.PinOrder
 		mergeWorkerStatuses(&qf, existing)
+		mergePreprocessStatuses(&qf, existing)
 	}
 	return writeQueueFileDataToPath(&qf, path)
 }
@@ -1291,6 +1417,21 @@ type additionalRequestInfo struct {
 	isDraft bool
 }
 
+// mapQueueStatusToAdditionalRequestStatus converts queue worker status to the
+// canonical additional-request status stored/displayed in SQLite/TUI.
+func mapQueueStatusToAdditionalRequestStatus(queueStatus string) string {
+	switch queueStatus {
+	case "pending":
+		return "created"
+	case "working":
+		return "in_progress"
+	case "completed":
+		return "completed"
+	default:
+		return ""
+	}
+}
+
 // maxRequestNumFromMap returns the highest request number for a given ticket path
 // from the reqInfoMap. Returns 0 if no entries exist for this path.
 func maxRequestNumFromMap(m map[string]additionalRequestInfo, ticketPath string) int {
@@ -1369,20 +1510,25 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 		return
 	}
 
-	// Build maps of ticket path:requestNum -> queue file status, draft state, and started_at
+	// Build maps of ticket path:requestNum -> queue file status, draft state, started_at, unread, and preprocessing
 	statusMap := make(map[string]string)
 	draftMap := make(map[string]bool)
 	startedAtMap := make(map[string]int64)
+	unreadMap := make(map[string]bool)
+	preprocessStatusMap := make(map[string]string)
 	for _, qt := range qf.Tickets {
 		key := additionalRequestKey(qt.Path, qt.RequestNum)
 		statusMap[key] = qt.Status
 		draftMap[key] = qt.IsDraft
 		startedAtMap[key] = qt.StartedAt
+		unreadMap[key] = qt.Unread
+		preprocessStatusMap[key] = qt.PreprocessStatus
 	}
 
 	// Update queue items with worker status + refresh frontmatter status when changed
 	items := m.queue.Items()
 	changed := false
+	unreadChanged := false // track if any item transitioned to unread (needs disk persist)
 	for i, qi := range items {
 		item, ok := qi.(tuiTicketItem)
 		if !ok {
@@ -1406,14 +1552,30 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 			item.workStartedAt = time.Time{}
 			changed = true
 		}
+		// Sync unread state from queue file
+		if fileUnread, exists := unreadMap[key]; exists && item.unread != fileUnread {
+			item.unread = fileUnread
+			changed = true
+		}
+		// Sync preprocessing status from queue file (preprocessing worker updates this)
+		if newPPS, exists := preprocessStatusMap[key]; exists && item.preprocessStatus != newPPS {
+			item.preprocessStatus = newPPS
+			changed = true
+		}
 		if newStatus, exists := statusMap[key]; exists {
 			oldWorkerStatus := item.workerStatus
 			item.workerStatus = newStatus
 			if oldWorkerStatus != newStatus {
 				changed = true
-				// When worker status changes to completed/failed, re-read frontmatter
+				// When worker status changes to completed, mark as unread
+				// so the user knows there's a new result to look at.
+				if newStatus == "completed" {
+					item.unread = true
+					unreadChanged = true
+				}
+				// When worker status changes to completed, re-read frontmatter
 				// status from disk so ticket icons update correctly.
-				if newStatus == "completed" || newStatus == "failed" {
+				if newStatus == "completed" {
 					if content, err := os.ReadFile(item.filePath); err == nil {
 						freshStatus := strings.ToLower(strings.TrimSpace(extractFrontmatterStatus(string(content))))
 						if idx := strings.Index(freshStatus, ":"); idx >= 0 {
@@ -1425,18 +1587,40 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 					}
 				}
 			}
-			// Reconcile additional request DB status: if queue says completed/failed
-			// but the item still shows "created", update both the DB and in-memory status.
-			if item.requestNum > 0 && (newStatus == "completed" || newStatus == "failed") && item.status == "created" {
-				item.status = "completed + verified"
-				changed = true
-				if database.DB != nil {
-					_ = database.UpdateAdditionalRequestStatus(context.Background(), item.filePath, item.requestNum, newStatus)
+			// For additional requests, keep status in sync with queue file state.
+			// The request's canonical status lives in SQLite, not frontmatter.
+			// Run this even when workerStatus hasn't changed to repair stale DB/list
+			// statuses after app restarts.
+			if item.requestNum > 0 {
+				mappedStatus := mapQueueStatusToAdditionalRequestStatus(newStatus)
+				if mappedStatus != "" && item.status != mappedStatus {
+					item.status = mappedStatus
+					changed = true
+					if database.DB != nil {
+						_ = database.UpdateAdditionalRequestStatus(context.Background(), item.filePath, item.requestNum, mappedStatus)
+					}
 				}
 			}
 			items[i] = item
 		}
 	}
+	// Detect items in TUI queue but missing from queue file (race condition recovery).
+	// If the worker wrote the queue file from a stale read, TUI-added items may have
+	// been clobbered. Re-persist them so the worker picks them up on its next poll.
+	for _, qi := range items {
+		item, ok := qi.(tuiTicketItem)
+		if !ok {
+			continue
+		}
+		key := additionalRequestKey(item.filePath, item.requestNum)
+		if _, exists := statusMap[key]; !exists {
+			devLog("TUI sync: item %s (req=%d) missing from queue file, re-persisting", filepath.Base(item.filePath), item.requestNum)
+			_ = writeQueueFileToPath(m, path)
+			changed = true // ensure cross-sync below runs
+			break
+		}
+	}
+
 	if changed {
 		m.queue.SetItems(items)
 		// Cross-sync workerStatus and refreshed status to the All Tickets list
@@ -1445,6 +1629,17 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 				m.updateAllListItem(item)
 			}
 		}
+		// Persist unread state changes back to disk so they survive the next sync cycle.
+		// Without this, the TUI sets unread=true in memory but the file still has false,
+		// and the next sync would clobber the in-memory true back to false.
+		if unreadChanged {
+			_ = m.writeQueueFile()
+		}
+	}
+
+	// Sync default preprocess prompt from queue file
+	if qf.DefaultPreprocessPrompt != m.defaultPreprocessPrompt {
+		m.defaultPreprocessPrompt = qf.DefaultPreprocessPrompt
 	}
 
 	// Sync shortcuts from queue file (may have been added by CLI)
@@ -1462,32 +1657,34 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 		m.syncQueueCurrentMarker()
 	}
 
-	// Sync current index from worker (worker computes it from statuses)
-	if m.queueRunning && qf.CurrentIndex != m.currentQueueIdx {
-		m.currentQueueIdx = qf.CurrentIndex
-		// Cap currentQueueIdx to the queue size. The queue file may reference
-		// more tickets than the TUI has (user removed items from queue).
-		queueLen := len(m.queue.Items())
-		if queueLen > 0 && m.currentQueueIdx >= queueLen {
-			m.currentQueueIdx = queueLen - 1
-		}
+	// Derive current index from ticket statuses (no persisted CurrentIndex needed)
+	newIdx := m.computeCurrentQueueIdx()
+	if newIdx != m.currentQueueIdx {
+		m.currentQueueIdx = newIdx
 		m.bumpDraftsAboveCurrent()
 		m.syncQueueCurrentMarker()
 	}
 
 	// Detect stale worker: reset "working" tickets when worker is dead or queue stopped.
 	// Must run BEFORE ordering enforcement so stale items become mutable first.
-	if m.queueRunning && qf.LastHeartbeat > 0 {
-		elapsed := time.Now().Unix() - qf.LastHeartbeat
-		if elapsed > 30 {
-			if qf.WorkerPID > 0 && isProcessAlive(qf.WorkerPID) {
-				m.workerLost = false // slow worker, not dead
-			} else {
+	// Primary check is PID liveness since idle workers don't write heartbeats.
+	if m.queueRunning && qf.WorkerPID > 0 {
+		if isProcessAlive(qf.WorkerPID) {
+			m.workerLost = false
+		} else {
+			m.workerLost = true
+			m.resetStaleWorkingTickets()
+		}
+	} else if m.queueRunning && qf.WorkerPID == 0 {
+		// No worker PID recorded — check heartbeat as fallback for backward compat
+		if qf.LastHeartbeat > 0 {
+			elapsed := time.Now().Unix() - qf.LastHeartbeat
+			if elapsed > 30 {
 				m.workerLost = true
 				m.resetStaleWorkingTickets()
+			} else {
+				m.workerLost = false
 			}
-		} else {
-			m.workerLost = false
 		}
 	} else if !m.queueRunning {
 		m.workerLost = false
@@ -1499,9 +1696,9 @@ func (m *tuiModel) syncFromQueueFileAtPath(path string) {
 	// Runs after stale "working" cleanup so cleared items are correctly classified.
 	items = m.queue.Items() // re-read in case changed above
 	if !validateQueueOrdering(items) {
-		newItems, newIdx := enforceQueueOrdering(items, m.currentQueueIdx)
+		newItems := enforceQueueOrdering(items)
 		m.queue.SetItems(newItems)
-		m.currentQueueIdx = newIdx
+		m.currentQueueIdx = m.computeCurrentQueueIdx()
 		m.syncQueueCurrentMarker()
 		_ = m.writeQueueFile()
 		devLog("TUI syncFromQueueFile: enforced ordering invariant")
@@ -1622,8 +1819,14 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.mode == tuiModeConfirmActivate {
 		return m.updateConfirmActivate(msg)
 	}
+	if m.mode == tuiModeConfirmDeleteQueue {
+		return m.updateConfirmDeleteQueue(msg)
+	}
 	if m.mode == tuiModeComment {
 		return m.updateComment(msg)
+	}
+	if m.mode == tuiModePreprocessPrompt {
+		return m.updatePreprocessPrompt(msg)
 	}
 
 	switch msg := msg.(type) {
@@ -1687,10 +1890,16 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "p":
-			// Paste all selected tickets into the focused queue (Queue tab only)
+			// Set preprocessing instruction (Queue tab only)
 			if m.tab == tuiTabQueue {
-				m.addSelectedToQueue()
-				_ = m.writeQueueFile()
+				if _, ok := m.queue.SelectedItem().(tuiTicketItem); ok {
+					m.mode = tuiModePreprocessPrompt
+					m.textArea.SetValue(m.defaultPreprocessPrompt)
+					m.textArea.SetWidth(60)
+					m.textArea.SetHeight(5)
+					m.textArea.Focus()
+					return m, m.textArea.Cursor.BlinkCmd()
+				}
 			}
 			return m, nil
 		case "r":
@@ -1720,10 +1929,23 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "o":
-			// Open selected ticket in Obsidian
+			// Open selected ticket in Obsidian and mark as read
 			if item, ok := al.SelectedItem().(tuiTicketItem); ok {
 				url := rawObsidianURL(item.workspace, item.filename)
 				openURL(url)
+				if item.unread {
+					item.unread = false
+					idx := al.Index()
+					items := al.Items()
+					items[idx] = item
+					al.SetItems(items)
+					if m.tab == tuiTabAll {
+						m.updateQueueItem(item)
+					} else {
+						m.updateAllListItem(item)
+					}
+					m.writeQueueFile()
+				}
 			}
 		case "V":
 			// Toggle SkipVerification on the selected ticket
@@ -1786,6 +2008,13 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mode = tuiModeHelp
 			return m, nil
 		case "c":
+			// Copy absolute path of focused ticket to clipboard
+			al := m.activeList()
+			if item, ok := al.SelectedItem().(tuiTicketItem); ok && item.filePath != "" {
+				_ = clipboard.WriteAll(item.filePath)
+			}
+			return m, nil
+		case "C":
 			// Add/edit comment on the selected ticket
 			al := m.activeList()
 			if item, ok := al.SelectedItem().(tuiTicketItem); ok && item.filePath != "" {
@@ -1797,11 +2026,6 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.textInput.Focus()
 				return m, m.textInput.Cursor.BlinkCmd()
 			}
-			return m, nil
-		case "C":
-			// Clear all queue shortcuts
-			m.queueShortcuts = nil
-			_ = m.writeQueueFile()
 			return m, nil
 		case "P":
 			// Edit queue prompt
@@ -1846,7 +2070,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.queue.SetItems(items)
 				// Enforce ordering before computing indices (mutable before immutable)
-				newItems, _ := enforceQueueOrdering(m.queue.Items(), -1)
+				newItems := enforceQueueOrdering(m.queue.Items())
 				m.queue.SetItems(newItems)
 				m.currentQueueIdx = m.lastPendingQueueIndex()
 				devLog("TUI 's' pressed: starting queue, currentQueueIdx=%d, queueLen=%d", m.currentQueueIdx, len(m.queue.Items()))
@@ -1869,7 +2093,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			idx := al.Index()
 			if idx > 0 {
 				items := al.Items()
-				// Block reorder if either ticket is immutable (completed/failed/active)
+				// Block reorder if either ticket is immutable (completed/active)
 				if m.tab == tuiTabQueue {
 					curr, currOk := items[idx].(tuiTicketItem)
 					swap, swapOk := items[idx-1].(tuiTicketItem)
@@ -1881,15 +2105,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				al.SetItems(items)
 				al.Select(idx - 1)
 				if m.tab == tuiTabQueue {
-					// Adjust currentQueueIdx if the swap involves the current ticket
-					if m.queueRunning {
-						if idx == m.currentQueueIdx {
-							m.currentQueueIdx = idx - 1
-						} else if idx-1 == m.currentQueueIdx {
-							m.currentQueueIdx = idx
-						}
-						m.syncQueueCurrentMarker()
-					}
+					m.currentQueueIdx = m.computeCurrentQueueIdx()
+					m.syncQueueCurrentMarker()
 					_ = m.writeQueueFile()
 				}
 			}
@@ -1899,7 +2116,7 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			idx := al.Index()
 			items := al.Items()
 			if idx < len(items)-1 {
-				// Block reorder if either ticket is immutable (completed/failed/active)
+				// Block reorder if either ticket is immutable (completed/active)
 				if m.tab == tuiTabQueue {
 					curr, currOk := items[idx].(tuiTicketItem)
 					swap, swapOk := items[idx+1].(tuiTicketItem)
@@ -1911,15 +2128,8 @@ func (m tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				al.SetItems(items)
 				al.Select(idx + 1)
 				if m.tab == tuiTabQueue {
-					// Adjust currentQueueIdx if the swap involves the current ticket
-					if m.queueRunning {
-						if idx == m.currentQueueIdx {
-							m.currentQueueIdx = idx + 1
-						} else if idx+1 == m.currentQueueIdx {
-							m.currentQueueIdx = idx
-						}
-						m.syncQueueCurrentMarker()
-					}
+					m.currentQueueIdx = m.computeCurrentQueueIdx()
+					m.syncQueueCurrentMarker()
 					_ = m.writeQueueFile()
 				}
 			}
@@ -1969,6 +2179,21 @@ func (m *tuiModel) lastPendingQueueIndex() int {
 	return -1
 }
 
+// computeCurrentQueueIdx derives the current queue index from ticket statuses.
+// Returns the index of the "working" ticket, or the last pending ticket if none
+// is working (where the worker will start next), or -1 if queue is not running.
+func (m *tuiModel) computeCurrentQueueIdx() int {
+	if !m.queueRunning {
+		return -1
+	}
+	for i, qi := range m.queue.Items() {
+		if item, ok := qi.(tuiTicketItem); ok && item.workerStatus == "working" {
+			return i
+		}
+	}
+	return m.lastPendingQueueIndex()
+}
+
 // syncQueueCurrentMarker updates the `current` flag on queue items based on currentQueueIdx.
 func (m *tuiModel) syncQueueCurrentMarker() {
 	items := m.queue.Items()
@@ -2016,24 +2241,23 @@ func (m *tuiModel) bumpDraftsAboveCurrent() {
 	newItems = append(newItems, items[m.currentQueueIdx]) // current item
 	newItems = append(newItems, rest...)
 
-	// Adjust currentQueueIdx: it shifted by the number of drafts inserted before it
-	m.currentQueueIdx += len(drafts)
 	m.queue.SetItems(newItems)
+	m.currentQueueIdx = m.computeCurrentQueueIdx()
 	m.syncQueueCurrentMarker()
 }
 
 // isTicketFinished returns true if the ticket has a completed/verified frontmatter status
-// or a terminal workerStatus (completed/failed). Finished tickets should not be reordered.
+// or a terminal workerStatus (completed). Finished tickets should not be reordered.
 func isTicketFinished(item tuiTicketItem) bool {
 	// Check frontmatter status: "completed" or "completed + verified" but not "not completed"
 	frontmatterDone := strings.Contains(item.status, "completed") && !strings.Contains(item.status, "not completed")
-	// Check worker status: completed or failed are terminal states
-	workerDone := item.workerStatus == "completed" || item.workerStatus == "failed"
+	// Check worker status
+	workerDone := item.workerStatus == "completed"
 	return frontmatterDone || workerDone
 }
 
 // isTicketImmutable returns true if the ticket should not be manually reordered (alt+up/down).
-// This includes finished tickets (completed/failed) AND actively worked-on tickets
+// This includes finished tickets (completed) AND actively worked-on tickets
 // (workerStatus == "working"). Both completed and active items are immutable in the queue.
 func isTicketImmutable(item tuiTicketItem) bool {
 	if isTicketFinished(item) {
@@ -2082,16 +2306,14 @@ func validateQueueOrdering(items []list.Item) bool {
 }
 
 // enforceQueueOrdering rearranges queue items so that all mutable items (uncompleted/draft)
-// come before immutable items (completed/active). Returns the reordered items and the new
-// currentQueueIdx. Preserves relative order within each group.
-func enforceQueueOrdering(items []list.Item, currentQueueIdx int) ([]list.Item, int) {
+// come before immutable items (completed/active). Preserves relative order within each group.
+func enforceQueueOrdering(items []list.Item) []list.Item {
 	if validateQueueOrdering(items) {
-		return items, currentQueueIdx
+		return items
 	}
 
 	var mutable []list.Item
 	var immutable []list.Item
-	newIdx := currentQueueIdx
 	for _, qi := range items {
 		item, ok := qi.(tuiTicketItem)
 		if !ok {
@@ -2109,15 +2331,7 @@ func enforceQueueOrdering(items []list.Item, currentQueueIdx int) ([]list.Item, 
 	result = append(result, mutable...)
 	result = append(result, immutable...)
 
-	// Adjust currentQueueIdx: find the current item by workerStatus == "working"
-	for i, qi := range result {
-		if item, ok := qi.(tuiTicketItem); ok && item.workerStatus == "working" {
-			newIdx = i
-			break
-		}
-	}
-
-	return result, newIdx
+	return result
 }
 
 // removeFromQueue removes a ticket from the queue by filePath and requestNum.
@@ -2126,24 +2340,8 @@ func (m *tuiModel) removeFromQueue(filePath string, requestNum int) {
 	for i, qi := range items {
 		if item, ok := qi.(tuiTicketItem); ok && item.filePath == filePath && item.requestNum == requestNum {
 			m.queue.RemoveItem(i)
-			// Adjust currentQueueIdx if running (bottom-to-top processing)
-			if m.queueRunning {
-				if i < m.currentQueueIdx {
-					m.currentQueueIdx--
-					devLog("TUI removeFromQueue: removed idx=%d < currentIdx, adjusted to %d", i, m.currentQueueIdx)
-				} else if i == m.currentQueueIdx {
-					// Current ticket removed; decrement to next pending (lower index).
-					// Don't stop the queue — keep running and wait for new items.
-					m.currentQueueIdx--
-					if m.currentQueueIdx < 0 {
-						devLog("TUI removeFromQueue: removed current ticket, no more pending — waiting for new items")
-						m.currentQueueIdx = -1
-					} else {
-						devLog("TUI removeFromQueue: removed current ticket, moved to idx=%d", m.currentQueueIdx)
-					}
-				}
-				m.syncQueueCurrentMarker()
-			}
+			m.currentQueueIdx = m.computeCurrentQueueIdx()
+			m.syncQueueCurrentMarker()
 			return
 		}
 	}
@@ -2170,15 +2368,10 @@ func (m *tuiModel) addSelectedToQueue() {
 		m.queue.InsertItem(insertIdx, item)
 		insertIdx++
 		added++
-		// Adjust currentQueueIdx since we inserted before it
-		if m.queueRunning && m.currentQueueIdx >= 0 {
-			m.currentQueueIdx++
-		}
 	}
-	// If the queue is running but was waiting for new items (currentQueueIdx == -1),
-	// set the index to the last pending item so the worker picks them up.
-	if m.queueRunning && m.currentQueueIdx < 0 && added > 0 {
-		m.currentQueueIdx = m.lastPendingQueueIndex()
+	// Recompute current index from statuses (handles both adjustments and idle→active)
+	if added > 0 {
+		m.currentQueueIdx = m.computeCurrentQueueIdx()
 		m.syncQueueCurrentMarker()
 	}
 }
@@ -2399,14 +2592,10 @@ func (m tuiModel) updateAdditionalContext(msg tea.Msg) (tea.Model, tea.Cmd) {
 								if ri, ok := li.(tuiTicketItem); ok && ri.filePath == item.filePath && ri.requestNum == newReqNum {
 									newItem := ri
 									newItem.isDraft = isDraft
-									// Insert at the front of the processing queue so it's
-									// processed next. Bottom-to-top processing means
-									// currentQueueIdx is the "front."
-									insertPos := 0
-									if m.queueRunning && m.currentQueueIdx >= 0 {
-										insertPos = m.currentQueueIdx
-									}
-									m.queue.InsertItem(insertPos, newItem)
+									// Always insert at position 0 (visual top of queue).
+									// Bottom-to-top processing means position 0 is
+									// processed last, giving user time to reorder.
+									m.queue.InsertItem(0, newItem)
 									if m.queueRunning && m.currentQueueIdx >= 0 {
 										m.currentQueueIdx++
 									}
@@ -2572,6 +2761,43 @@ func (m tuiModel) updateComment(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// updatePreprocessPrompt handles input when entering a preprocessing instruction.
+func (m tuiModel) updatePreprocessPrompt(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+s":
+			prompt := strings.TrimSpace(m.textArea.Value())
+			if prompt == "" {
+				m.mode = tuiModeList
+				m.textArea.Blur()
+				return m, nil
+			}
+			// Save as default for next use
+			m.defaultPreprocessPrompt = prompt
+			// Apply to the focused item only
+			items := m.queue.Items()
+			if focusedItem, ok := m.queue.SelectedItem().(tuiTicketItem); ok {
+				focusedItem.preprocessPrompt = prompt
+				focusedItem.preprocessStatus = "pending"
+				items[m.queue.Index()] = focusedItem
+				m.queue.SetItems(items)
+				_ = m.writeQueueFile()
+			}
+			m.mode = tuiModeList
+			m.textArea.Blur()
+			return m, nil
+		case "esc":
+			m.mode = tuiModeList
+			m.textArea.Blur()
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.textArea, cmd = m.textArea.Update(msg)
+	return m, cmd
+}
+
 // updateQueuePicker handles input when the queue picker list is showing.
 // Uses a full bubbles list with filtering, pinning, and queue management.
 func (m tuiModel) updateQueuePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -2640,17 +2866,14 @@ func (m tuiModel) updateQueuePicker(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.textInput.Focus()
 			return m, m.textInput.Cursor.BlinkCmd()
 		case "d":
-			// Delete the highlighted queue (if not active)
+			// Delete the highlighted queue (with confirmation)
 			if item, ok := m.queuePickerList.SelectedItem().(tuiQueueItem); ok {
 				if item.active {
 					cmd := m.queuePickerList.NewStatusMessage("Cannot delete the active queue")
 					return m, cmd
 				}
-				path := queueFilePathForID(item.id)
-				os.Remove(path)
-				items := loadQueuePickerItems(m.activeQueueID)
-				m.queuePickerList.SetItems(items)
-				m.refreshPinnedQueues()
+				m.pendingDeleteQueueID = item.id
+				m.mode = tuiModeConfirmDeleteQueue
 			}
 			return m, nil
 		case "r":
@@ -2836,12 +3059,8 @@ func (m tuiModel) updateConfirmActivate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if foundIdx >= 0 {
 				// Remove from current position (adjusts currentQueueIdx)
 				m.removeFromQueue(m.pendingActivatePath, m.pendingActivateRequestNum)
-				// Insert at the front of the processing queue
-				insertPos := 0
-				if m.queueRunning && m.currentQueueIdx >= 0 {
-					insertPos = m.currentQueueIdx
-				}
-				m.queue.InsertItem(insertPos, activatedItem)
+				// Always insert at position 0 (visual top of queue)
+				m.queue.InsertItem(0, activatedItem)
 				if m.queueRunning && m.currentQueueIdx >= 0 {
 					m.currentQueueIdx++
 				}
@@ -2860,6 +3079,29 @@ func (m tuiModel) updateConfirmActivate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingActivatePath = ""
 			m.pendingActivateRequestNum = 0
 			m.mode = tuiModeList
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+// updateConfirmDeleteQueue handles the confirmation dialog for deleting a queue.
+func (m tuiModel) updateConfirmDeleteQueue(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "y", "Y":
+			path := queueFilePathForID(m.pendingDeleteQueueID)
+			os.Remove(path)
+			items := loadQueuePickerItems(m.activeQueueID)
+			m.queuePickerList.SetItems(items)
+			m.refreshPinnedQueues()
+			m.pendingDeleteQueueID = ""
+			m.mode = tuiModeQueuePicker
+			return m, nil
+		case "n", "N", "esc":
+			m.pendingDeleteQueueID = ""
+			m.mode = tuiModeQueuePicker
 			return m, nil
 		}
 	}
@@ -3066,7 +3308,7 @@ func helpText() string {
  d          Remove / activate draft (Queue tab)
  v          Toggle skip-verification (Queue tab)
  V          Toggle skip-verification
- p          Paste selected to queue (Queue tab)
+ p          Set preprocessing instruction (Queue tab)
  R          Reset ticket (with backup)
  I          Set min iterations
  Tab        Switch All/Queue tabs
@@ -3077,8 +3319,8 @@ func helpText() string {
             P unpin | n new | d delete
             r rename | / filter | esc close
             alt+up/down reorder pinned
- c          Add/edit comment on ticket
- C          Clear queue shortcuts
+ c          Copy ticket path to clipboard
+ C          Add/edit comment on ticket
  s          Start queue
  S          Stop queue
  alt+up     Move ticket up (not finished)
@@ -3155,7 +3397,7 @@ TODO`, now, instructions)
 	return fp, os.WriteFile(fp, []byte(content), 0644)
 }
 
-// queueRemainingCount returns the number of queue items that are not completed, failed, or drafts.
+// queueRemainingCount returns the number of queue items that are not completed or drafts.
 func (m tuiModel) queueRemainingCount() int {
 	var remaining int
 	for _, qi := range m.queue.Items() {
@@ -3167,7 +3409,7 @@ func (m tuiModel) queueRemainingCount() int {
 			continue
 		}
 		switch item.workerStatus {
-		case "completed", "failed":
+		case "completed":
 			// done — don't count
 		default:
 			remaining++
@@ -3176,13 +3418,13 @@ func (m tuiModel) queueRemainingCount() int {
 	return remaining
 }
 
-// queueStatusBadges returns a string with completed/failed/pending counts for the queue.
+// queueStatusBadges returns a string with completed/pending counts for the queue.
 func (m tuiModel) queueStatusBadges() string {
 	items := m.queue.Items()
 	if len(items) == 0 {
 		return ""
 	}
-	var completed, failed, pending int
+	var completed, pending, unread int
 	for _, qi := range items {
 		item, ok := qi.(tuiTicketItem)
 		if !ok {
@@ -3191,22 +3433,23 @@ func (m tuiModel) queueStatusBadges() string {
 		switch item.workerStatus {
 		case "completed":
 			completed++
-		case "failed":
-			failed++
 		default:
 			// "pending", "working", or empty — count as pending
 			pending++
+		}
+		if item.unread {
+			unread++
 		}
 	}
 	var parts []string
 	if completed > 0 {
 		parts = append(parts, fmt.Sprintf("◆%d", completed))
 	}
-	if failed > 0 {
-		parts = append(parts, fmt.Sprintf("✗%d", failed))
-	}
 	if pending > 0 {
 		parts = append(parts, fmt.Sprintf("○%d", pending))
+	}
+	if unread > 0 {
+		parts = append(parts, fmt.Sprintf("%du", unread))
 	}
 	if len(parts) == 0 {
 		return ""
@@ -3405,8 +3648,12 @@ func (m tuiModel) View() string {
 			}
 		}
 		return docStyle.Render(tabBarStr + activeView + "\n\nActivate draft \"" + activateTitle + "\"? This will make it actionable. (y/n)")
+	case tuiModeConfirmDeleteQueue:
+		return docStyle.Render(m.queuePickerList.View() + "\n\nDelete queue \"" + m.pendingDeleteQueueID + "\"? (y/n)")
 	case tuiModeComment:
 		return docStyle.Render(tabBarStr + activeView + "\n\n── Comment ──\n" + m.textInput.View() + "  (enter to save, esc to cancel)")
+	case tuiModePreprocessPrompt:
+		return docStyle.Render(tabBarStr + activeView + "\n\n── Preprocessing Instruction ──\n" + m.textArea.View() + "\n(ctrl+s to apply, esc to cancel)")
 	default:
 		return docStyle.Render(tabBarStr + activeView)
 	}
@@ -3428,8 +3675,10 @@ func init() {
 	// queue command with subcommands
 	queueAddCmd.Flags().String("queue", "default", "Queue ID to add ticket to")
 	queueLsCmd.Flags().String("queue", "default", "Queue ID to list")
+	queueMarkReadCmd.Flags().String("queue", "default", "Queue ID to mark read")
 	queueCmd.AddCommand(queueAddCmd)
 	queueCmd.AddCommand(queueLsCmd)
+	queueCmd.AddCommand(queueMarkReadCmd)
 	rootCmd.AddCommand(queueCmd)
 }
 
@@ -3556,6 +3805,59 @@ Use --queue <id> to specify which queue (default: "default").`,
 	},
 }
 
+// markAllReadInQueueFileForID marks all tickets in a queue as read.
+func markAllReadInQueueFileForID(queueID string) (int, error) {
+	return markAllReadInQueueFileAtPath(queueFilePathForID(queueID))
+}
+
+// markAllReadInQueueFileAtPath is the testable version with an explicit path.
+// Returns the number of tickets that were marked as read.
+func markAllReadInQueueFileAtPath(path string) (int, error) {
+	qf, err := readQueueFileFromPath(path)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for i := range qf.Tickets {
+		if qf.Tickets[i].Unread {
+			qf.Tickets[i].Unread = false
+			count++
+		}
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	return count, writeQueueFileDataToPath(qf, path)
+}
+
+var queueMarkReadCmd = &cobra.Command{
+	Use:   "mark-read",
+	Short: "Mark all items in a queue as read",
+	Long: `Marks all unread tickets in the specified queue as read.
+
+Use --queue <id> to specify which queue (default: "default").
+
+Examples:
+  wiggums queue mark-read
+  wiggums queue mark-read --queue my-sprint`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		queueID, _ := cmd.Flags().GetString("queue")
+		if queueID == "" {
+			queueID = "default"
+		}
+		count, err := markAllReadInQueueFileForID(queueID)
+		if err != nil {
+			return fmt.Errorf("failed to mark read in queue %q: %w", queueID, err)
+		}
+		if count == 0 {
+			fmt.Printf("No unread items in queue %q.\n", queueID)
+		} else {
+			fmt.Printf("Marked %d item(s) as read in queue %q.\n", count, queueID)
+		}
+		return nil
+	},
+}
+
 var queueCmd = &cobra.Command{
 	Use:   "queue",
 	Short: "Manage ticket queues",
@@ -3638,7 +3940,7 @@ func addTicketToQueueFileAtPath(ticketPath, workspace, path string) error {
 	qf, err := readQueueFileFromPath(path)
 	if err != nil {
 		// Queue file doesn't exist yet — create a minimal one
-		qf = &QueueFile{Name: "Work Queue", CurrentIndex: -1}
+		qf = &QueueFile{Name: "Work Queue"}
 	}
 
 	// Check if ticket is already in queue
@@ -3655,11 +3957,6 @@ func addTicketToQueueFileAtPath(ticketPath, workspace, path string) error {
 		Status:    "pending",
 	}
 	qf.Tickets = append([]QueueTicket{ticket}, qf.Tickets...)
-
-	// Adjust currentQueueIdx if queue is running
-	if qf.Running && qf.CurrentIndex >= 0 {
-		qf.CurrentIndex++
-	}
 
 	return writeQueueFileDataToPath(qf, path)
 }
@@ -3708,9 +4005,9 @@ Examples:
 		fmt.Println()
 
 		// List tickets
-		for i, t := range qf.Tickets {
+		for _, t := range qf.Tickets {
 			marker := "  "
-			if qf.Running && i == qf.CurrentIndex {
+			if qf.Running && t.Status == "working" {
 				marker = ">> "
 			}
 
@@ -3718,8 +4015,6 @@ Examples:
 			switch t.Status {
 			case "completed":
 				statusIcon = "◆"
-			case "failed":
-				statusIcon = "✗"
 			case "working":
 				statusIcon = "▶"
 			case "pending":

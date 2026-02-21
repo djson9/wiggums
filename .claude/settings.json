@@ -1,5 +1,4 @@
 {
-  "additionalDirectories": ["../"],
   "hooks": {
     "Stop": [
       {
@@ -12,5 +11,11 @@
         ]
       }
     ]
+  },
+  "additionalDirectories": [
+    "../"
+  ],
+  "enabledPlugins": {
+    "playwright@claude-plugins-official": false
   }
 }

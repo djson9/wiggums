@@ -1,0 +1,1 @@
+There seems to be an issue with wiggums tui and queue ordering. Please create very basic test tickets, wait for them to complete. Play with starting, stopping queues. Try to find bugs related to status and ordering and fix them. Use tmux to e2e test.

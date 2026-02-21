@@ -97,3 +97,12 @@ All frontmatter reads/writes live in `cmd/run.go` as standalone functions that s
 3. **Loop wiring**: Call the writer at the appropriate point in `runLoop()` (after `cfg.runner.Run()` for per-turn updates)
 4. **Template**: Add the field to `templates/Ticket_Template.md`
 5. **Tests**: Add unit test for the function + integration test in `TestRunLoop_*` using `mockRunner`
+
+<IMPORTANT>
+The way the queue works is oldest tickets are at the very bottom of the list.
+We allow the user to organize uncompleted ticketes, but completed tickets are immutable.
+Since completed are at the bottom of the list. The queue works it's way up.
+User can freely rearrange tickets that are not worked on, however when queue is active and starts working on a ticket,
+the position is immutable for that ticket (until queue is stopped.).
+Unworked tickets remain at the top of the queue.
+</IMPORTANT>

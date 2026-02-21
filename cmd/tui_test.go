@@ -13,6 +13,7 @@ import (
 
 	"wiggums/database"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -70,6 +71,71 @@ func TestTuiTicketItem_Description(t *testing.T) {
 	}
 	if !strings.Contains(desc, "created") {
 		t.Errorf("Description()=%q, want status", desc)
+	}
+}
+
+func TestFormatDurationSeconds(t *testing.T) {
+	tests := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{5 * time.Second, "5s"},
+		{45 * time.Second, "45s"},
+		{1*time.Minute + 30*time.Second, "1m30s"},
+		{5 * time.Minute, "5m"},
+		{10*time.Minute + 5*time.Second, "10m5s"},
+		{1 * time.Hour, "1h"},
+		{1*time.Hour + 30*time.Minute, "1h30m"},
+		{2*time.Hour + 15*time.Minute, "2h15m"},
+	}
+	for _, tt := range tests {
+		got := formatDurationSeconds(tt.d)
+		if got != tt.want {
+			t.Errorf("formatDurationSeconds(%v) = %q, want %q", tt.d, got, tt.want)
+		}
+	}
+}
+
+func TestDescription_ShowsElapsedForWorkingTicket(t *testing.T) {
+	item := tuiTicketItem{
+		workspace:    "ws",
+		status:       "created",
+		workerStatus: "working",
+		workStartedAt: time.Now().Add(-1*time.Minute - 30*time.Second),
+	}
+	desc := item.Description()
+	if !strings.Contains(desc, "1m") {
+		t.Errorf("Description()=%q, should contain elapsed time with minutes", desc)
+	}
+	if !strings.Contains(desc, "s") {
+		t.Errorf("Description()=%q, should contain seconds", desc)
+	}
+}
+
+func TestDescription_ShowsRunDurationForCompletedTicket(t *testing.T) {
+	item := tuiTicketItem{
+		workspace:   "ws",
+		status:      "completed",
+		runDuration: 5 * time.Minute,
+	}
+	desc := item.Description()
+	if !strings.Contains(desc, "5m") {
+		t.Errorf("Description()=%q, should contain '5m' run duration", desc)
+	}
+}
+
+func TestDescription_NoElapsedWhenNotWorking(t *testing.T) {
+	item := tuiTicketItem{
+		workspace:     "ws",
+		status:        "created",
+		workerStatus:  "pending",
+		workStartedAt: time.Now().Add(-2 * time.Minute),
+	}
+	desc := item.Description()
+	// Should not contain second-precision elapsed time
+	if strings.Contains(desc, "m") && strings.Contains(desc, "s") && strings.Contains(desc, "2m") {
+		t.Errorf("Description()=%q, should NOT show elapsed time when not working", desc)
 	}
 }
 
@@ -1733,9 +1799,9 @@ Below to be filled by agent. Agent should not modify above this line.
 
 func TestMaxRequestNumFromMap(t *testing.T) {
 	m := map[string]additionalRequestInfo{
-		"/path/ticket.md:1": {status: "created", isDraft: true},
-		"/path/ticket.md:2": {status: "created", isDraft: false},
-		"/path/ticket.md:3": {status: "created", isDraft: true},
+		"/path/ticket.md:1":  {status: "created", isDraft: true},
+		"/path/ticket.md:2":  {status: "created", isDraft: false},
+		"/path/ticket.md:3":  {status: "created", isDraft: true},
 		"/other/ticket.md:1": {status: "created"},
 	}
 
@@ -1957,19 +2023,19 @@ func TestTuiModel_AdditionalContext_Save_InsertsAfterCurrent(t *testing.T) {
 
 	// The original "Third" ticket (requestNum=0) is already in the queue, but
 	// the NEW request item (requestNum=1) is a separate list item and gets
-	// inserted at currentQueueIdx (1) so it's processed next. Queue grows from 3 to 4.
+	// inserted at position 0 (visual top). Queue grows from 3 to 4.
 	queueItems := updated.queue.Items()
 	if len(queueItems) != 4 {
 		t.Fatalf("queue should have 4 items (3 original + 1 new request), got %d", len(queueItems))
 	}
-	// The new request item should be at currentQueueIdx position (1)
-	newReq := queueItems[1].(tuiTicketItem)
+	// The new request item should be at position 0 (top)
+	newReq := queueItems[0].(tuiTicketItem)
 	if newReq.requestNum != 1 {
 		t.Errorf("new queue item requestNum = %d, want 1", newReq.requestNum)
 	}
 	// currentQueueIdx should be adjusted +1 since we inserted before it
 	if updated.currentQueueIdx != 2 {
-		t.Errorf("currentQueueIdx=%d, want 2 (adjusted for insert at currentQueueIdx)", updated.currentQueueIdx)
+		t.Errorf("currentQueueIdx=%d, want 2 (adjusted for insert at 0)", updated.currentQueueIdx)
 	}
 
 	// The ticket file should have additional context appended
@@ -2448,15 +2514,12 @@ func TestTuiModel_MultipleSelections(t *testing.T) {
 		t.Fatalf("queue should be empty after space (select-only), got %d", len(qi))
 	}
 
-	// Switch to Queue tab then press 'p' to paste all selected into queue
-	updated.tab = tuiTabQueue
-	newModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	updated = newModel.(tuiModel)
-
-	// Queue should have 2 items in order
+	// 'p' on Queue tab now opens preprocessing dialog (no longer pastes).
+	// Add items to queue directly to verify selection state.
+	updated.addSelectedToQueue()
 	qi = updated.queue.Items()
 	if len(qi) != 2 {
-		t.Fatalf("queue should have 2 items after p, got %d", len(qi))
+		t.Fatalf("queue should have 2 items after addSelectedToQueue, got %d", len(qi))
 	}
 	if qi[0].(tuiTicketItem).title != "First" {
 		t.Errorf("queue[0] = %q, want 'First'", qi[0].(tuiTicketItem).title)
@@ -2523,13 +2586,11 @@ func TestTuiModel_ViewTabBarCount(t *testing.T) {
 	m.list.SetSize(80, 24)
 	m.queue.SetSize(80, 24)
 
-	// Select a ticket with space, then switch to Queue tab and press p to paste
+	// Select a ticket with space, then add to queue directly
 	m.list.Select(0)
 	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	updated := newModel.(tuiModel)
-	updated.tab = tuiTabQueue
-	newModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	updated = newModel.(tuiModel)
+	updated.addSelectedToQueue()
 	view := updated.View()
 	if !strings.Contains(view, "Queue (1)") {
 		t.Errorf("tab bar should show Queue (1) after adding item, got: %s", view)
@@ -2900,6 +2961,73 @@ func TestTuiModel_StartQueue(t *testing.T) {
 	}
 }
 
+func TestTuiModel_StartQueue_DoesNotDowngradeCompletedAdditionalRequest(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "workspaces", "testws")
+	ticketsDir := filepath.Join(wsDir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	os.WriteFile(filepath.Join(wsDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
+
+	ticketPath := filepath.Join(ticketsDir, "0001_Alpha.md")
+	ticketContent := `---
+Status: completed + verified
+---
+# Alpha
+
+### Additional User Request #1 — 2026-02-21 16:00
+Please retry
+`
+	os.WriteFile(ticketPath, []byte(ticketContent), 0644)
+
+	_, _ = database.CreateAdditionalRequest(context.Background(), ticketPath, 1, false, "Please retry", "completed + verified")
+	_ = database.UpdateAdditionalRequestStatus(context.Background(), ticketPath, 1, "pending")
+
+	queuePath := queueFilePathForID("default")
+	os.MkdirAll(filepath.Dir(queuePath), 0755)
+	qf := &QueueFile{
+		Name:         "Queue",
+		Running:      false,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "testws", Status: "completed", RequestNum: 1},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+	defer os.Remove(queuePath)
+
+	m, err := newTuiModel(baseDir)
+	if err != nil {
+		t.Fatalf("newTuiModel: %v", err)
+	}
+	if len(m.queue.Items()) != 1 {
+		t.Fatalf("queue items=%d, want 1", len(m.queue.Items()))
+	}
+	before := m.queue.Items()[0].(tuiTicketItem)
+	if before.status != "completed" {
+		t.Fatalf("before start status=%q, want 'completed'", before.status)
+	}
+
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated := newModel.(tuiModel)
+	after := updated.queue.Items()[0].(tuiTicketItem)
+	if after.status != "completed" {
+		t.Errorf("after start status=%q, want 'completed' (must not downgrade to created)", after.status)
+	}
+
+	afterQf, err := readQueueFileFromPath(queuePath)
+	if err != nil {
+		t.Fatalf("readQueueFileFromPath: %v", err)
+	}
+	if len(afterQf.Tickets) != 1 {
+		t.Fatalf("queue file tickets=%d, want 1", len(afterQf.Tickets))
+	}
+	if afterQf.Tickets[0].Status != "completed" {
+		t.Errorf("queue file status=%q, want 'completed'", afterQf.Tickets[0].Status)
+	}
+}
+
 func TestTuiModel_StartQueue_EmptyQueue(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "Test", status: "created"},
@@ -3018,16 +3146,16 @@ func TestTuiModel_TitleShowsCurrent(t *testing.T) {
 func TestTuiModel_RemoveFromQueueWhileRunning(t *testing.T) {
 	m := newTestTuiModelWithItems([]list.Item{
 		tuiTicketItem{title: "A", status: "created", filePath: "/tmp/a.md", selected: true},
-		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md", selected: true},
+		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md", selected: true, workerStatus: "working"},
 		tuiTicketItem{title: "C", status: "created", filePath: "/tmp/c.md", selected: true},
 	})
 	m.queue.SetItems([]list.Item{
 		tuiTicketItem{title: "A", status: "created", filePath: "/tmp/a.md", selected: true},
-		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md", selected: true},
+		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md", selected: true, workerStatus: "working"},
 		tuiTicketItem{title: "C", status: "created", filePath: "/tmp/c.md", selected: true},
 	})
 	m.queueRunning = true
-	m.currentQueueIdx = 1 // currently on B
+	m.currentQueueIdx = 1 // currently on B (workerStatus="working")
 
 	// Remove A (before current) — currentQueueIdx should decrement
 	m.removeFromQueue("/tmp/a.md", 0)
@@ -3132,9 +3260,6 @@ func TestWriteAndReadQueueFile(t *testing.T) {
 	if !qf.Running {
 		t.Error("Running should be true")
 	}
-	if qf.CurrentIndex != 0 {
-		t.Errorf("CurrentIndex = %d, want 0", qf.CurrentIndex)
-	}
 	if len(qf.Tickets) != 2 {
 		t.Fatalf("Tickets count = %d, want 2", len(qf.Tickets))
 	}
@@ -3223,14 +3348,13 @@ func TestBuildPreviousTicketContext(t *testing.T) {
 	bPath := filepath.Join(dir, "b.md")
 	cPath := filepath.Join(dir, "c.md")
 	os.WriteFile(aPath, []byte("---\nStatus: completed\n---\n# Ticket A\nDid some work here"), 0644)
-	os.WriteFile(bPath, []byte("---\nStatus: failed\n---\n# Ticket B\n"), 0644)
+	os.WriteFile(bPath, []byte("---\nStatus: not completed\n---\n# Ticket B\n"), 0644)
 	os.WriteFile(cPath, []byte("---\nStatus: working\n---\n# Ticket C\n"), 0644)
 
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: cPath, Status: "working"},
-			{Path: bPath, Status: "failed"},
+			{Path: bPath, Status: "pending"},
 			{Path: aPath, Status: "completed"},
 		},
 	}
@@ -3247,9 +3371,9 @@ func TestBuildPreviousTicketContext(t *testing.T) {
 	if strings.Contains(ctx, "Did some work here") {
 		t.Error("context should not include full ticket content")
 	}
-	// Should NOT include failed or current tickets
+	// Should NOT include pending or current tickets
 	if strings.Contains(ctx, bPath) {
-		t.Error("context should not include failed ticket b.md")
+		t.Error("context should not include pending ticket b.md")
 	}
 	if strings.Contains(ctx, cPath) {
 		t.Error("context should not include current ticket c.md")
@@ -3258,7 +3382,6 @@ func TestBuildPreviousTicketContext(t *testing.T) {
 
 func TestBuildPreviousTicketContext_NoPrevious(t *testing.T) {
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Status: "working"},
 		},
@@ -3277,7 +3400,6 @@ func TestAdvanceQueue(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Status: "pending"},
 			{Path: "/tmp/b.md", Status: "pending"},
@@ -3290,9 +3412,6 @@ func TestAdvanceQueue(t *testing.T) {
 	// Mark ticket[1] as completed, advance should go to ticket[0] (next pending)
 	qf.Tickets[1].Status = "completed"
 	advanceQueueToPath(qf, queuePath)
-	if qf.CurrentIndex != 0 {
-		t.Errorf("CurrentIndex = %d, want 0 after advance", qf.CurrentIndex)
-	}
 	if !qf.Running {
 		t.Error("queue should still be running")
 	}
@@ -3302,9 +3421,6 @@ func TestAdvanceQueue(t *testing.T) {
 	advanceQueueToPath(qf, queuePath)
 	if !qf.Running {
 		t.Error("queue should stay running (waits for new items)")
-	}
-	if qf.CurrentIndex != -1 {
-		t.Errorf("CurrentIndex = %d, want -1 after all done", qf.CurrentIndex)
 	}
 }
 
@@ -3347,7 +3463,6 @@ func TestWorkerLoop_ProcessesTickets(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -3403,7 +3518,6 @@ func TestWorkerLoop_StoppedQueue(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      false,
-		CurrentIndex: -1,
 		Tickets:      []QueueTicket{},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -3442,7 +3556,6 @@ func TestSyncFromQueueFile_UpdatesWorkerStatus(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "working"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "pending"},
@@ -3487,7 +3600,6 @@ func TestSyncFromQueueFile_WorkerCompletedTicket(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "working"},
@@ -3532,7 +3644,6 @@ func TestSyncFromQueueFile_WorkerFinished(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      false,
-		CurrentIndex: -1,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed"},
 		},
@@ -3565,7 +3676,7 @@ func TestSyncFromQueueFile_NoFile(t *testing.T) {
 	}
 }
 
-func TestSyncFromQueueFile_WorkerFailed(t *testing.T) {
+func TestSyncFromQueueFile_WorkerPendingAfterError(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
 
@@ -3578,13 +3689,12 @@ func TestSyncFromQueueFile_WorkerFailed(t *testing.T) {
 	m.queueRunning = true
 	m.currentQueueIdx = 0
 
-	// Worker failed on ticket A, moved to B
+	// Worker set ticket A back to pending after error, moved to B
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
-			{Path: "/tmp/a.md", Workspace: "ws", Status: "failed"},
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "pending"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "working"},
 		},
 	}
@@ -3593,8 +3703,8 @@ func TestSyncFromQueueFile_WorkerFailed(t *testing.T) {
 	m.syncFromQueueFileAtPath(queuePath)
 
 	a := m.queue.Items()[0].(tuiTicketItem)
-	if a.workerStatus != "failed" {
-		t.Errorf("item A workerStatus=%q, want 'failed'", a.workerStatus)
+	if a.workerStatus != "pending" {
+		t.Errorf("item A workerStatus=%q, want 'pending'", a.workerStatus)
 	}
 	if m.currentQueueIdx != 1 {
 		t.Errorf("currentQueueIdx=%d, want 1", m.currentQueueIdx)
@@ -3603,7 +3713,7 @@ func TestSyncFromQueueFile_WorkerFailed(t *testing.T) {
 
 func TestDescriptionHidesWorkerStatus(t *testing.T) {
 	// Worker status should never appear in Description()
-	for _, ws := range []string{"working", "completed", "failed", "pending", ""} {
+	for _, ws := range []string{"working", "completed", "pending", ""} {
 		item := tuiTicketItem{workspace: "ws", status: "created", workerStatus: ws}
 		desc := item.Description()
 		if strings.Contains(desc, "worker:") {
@@ -3645,7 +3755,6 @@ func TestRestoreQueueState(t *testing.T) {
 		Name:         "Restored Queue",
 		Prompt:       "Always test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "completed"},
 			{Path: ticket2, Workspace: "testws", Status: "working"},
@@ -3700,6 +3809,72 @@ func TestRestoreQueueState(t *testing.T) {
 	}
 }
 
+func TestRestoreQueueState_AdditionalRequestStatusFromQueueFile(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "workspaces", "testws")
+	ticketsDir := filepath.Join(wsDir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	os.WriteFile(filepath.Join(wsDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
+
+	ticketPath := filepath.Join(ticketsDir, "0001_Alpha.md")
+	ticketContent := `---
+Status: completed + verified
+---
+# Alpha
+
+### Additional User Request #1 — 2026-02-21 16:00
+Please retry
+`
+	os.WriteFile(ticketPath, []byte(ticketContent), 0644)
+
+	// Seed stale DB status to simulate pre-sync restart state.
+	_, _ = database.CreateAdditionalRequest(context.Background(), ticketPath, 1, false, "Please retry", "completed + verified")
+	_ = database.UpdateAdditionalRequestStatus(context.Background(), ticketPath, 1, "pending")
+
+	// Queue file says this additional request is completed.
+	queuePath := queueFilePathForID("default")
+	os.MkdirAll(filepath.Dir(queuePath), 0755)
+	qf := &QueueFile{
+		Name:         "Restored Queue",
+		Running:      false,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "testws", Status: "completed", RequestNum: 1},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+	defer os.Remove(queuePath)
+
+	m, err := newTuiModel(baseDir)
+	if err != nil {
+		t.Fatalf("newTuiModel: %v", err)
+	}
+
+	if len(m.queue.Items()) != 1 {
+		t.Fatalf("queue items=%d, want 1", len(m.queue.Items()))
+	}
+	item := m.queue.Items()[0].(tuiTicketItem)
+	if item.requestNum != 1 {
+		t.Fatalf("requestNum=%d, want 1", item.requestNum)
+	}
+	if item.workerStatus != "completed" {
+		t.Errorf("workerStatus=%q, want 'completed'", item.workerStatus)
+	}
+	if item.status != "completed" {
+		t.Errorf("status=%q, want 'completed' mapped from queue status", item.status)
+	}
+
+	req, err := database.GetAdditionalRequest(context.Background(), ticketPath, 1)
+	if err != nil {
+		t.Fatalf("GetAdditionalRequest: %v", err)
+	}
+	if req.Status != "completed" {
+		t.Errorf("db status=%q, want 'completed'", req.Status)
+	}
+}
+
 func TestRestoreQueueState_NoFile(t *testing.T) {
 	baseDir := t.TempDir()
 	wsDir := filepath.Join(baseDir, "workspaces", "testws")
@@ -3733,14 +3908,14 @@ func TestRestoreQueueState_NoFile(t *testing.T) {
 
 // --- Bug fix tests (iteration 20) ---
 
-// TestWriteQueueFile_PreservesWorkerFailedStatus verifies that writeQueueFile
-// does not overwrite worker-reported "failed" status with "completed".
-func TestWriteQueueFile_PreservesWorkerFailedStatus(t *testing.T) {
+// TestWriteQueueFile_PendingWorkerStatusBeforeCurrent verifies that writeQueueFile
+// writes "pending" for tickets with pending workerStatus before current.
+func TestWriteQueueFile_PendingWorkerStatusBeforeCurrent(t *testing.T) {
 	dir := t.TempDir()
 	queuePath := filepath.Join(dir, "queue.json")
 
 	items := []list.Item{
-		tuiTicketItem{title: "Ticket1", filePath: "/tmp/t1.md", workspace: "ws", workerStatus: "failed"},
+		tuiTicketItem{title: "Ticket1", filePath: "/tmp/t1.md", workspace: "ws", workerStatus: "pending"},
 		tuiTicketItem{title: "Ticket2", filePath: "/tmp/t2.md", workspace: "ws", workerStatus: "working"},
 		tuiTicketItem{title: "Ticket3", filePath: "/tmp/t3.md", workspace: "ws", workerStatus: ""},
 	}
@@ -3759,9 +3934,9 @@ func TestWriteQueueFile_PreservesWorkerFailedStatus(t *testing.T) {
 		t.Fatalf("readQueueFileFromPath: %v", err)
 	}
 
-	// Ticket1 (index 0, before current) has workerStatus "failed" — should be preserved, NOT "completed"
-	if qf.Tickets[0].Status != "failed" {
-		t.Errorf("ticket1 status=%q, want 'failed' (worker status should be preserved)", qf.Tickets[0].Status)
+	// Ticket1 (index 0, before current) has workerStatus "pending" — recalculated as "pending"
+	if qf.Tickets[0].Status != "pending" {
+		t.Errorf("ticket1 status=%q, want 'pending'", qf.Tickets[0].Status)
 	}
 	// Ticket2 (index 1, current) has workerStatus "working" — should be preserved
 	if qf.Tickets[1].Status != "working" {
@@ -4008,7 +4183,7 @@ func TestStopQueue_DoesNotClearWorkerStatuses(t *testing.T) {
 func TestStartQueue_ResetsCompletedStatuses(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true, workerStatus: "completed"},
-		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true, workerStatus: "failed"},
+		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true, workerStatus: "pending"},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
@@ -4079,7 +4254,6 @@ func TestBuildPreviousTicketContext_PathOnly(t *testing.T) {
 	os.WriteFile(ticketPath, []byte(ticketContent), 0644)
 
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/current.md", Status: "working"},
 			{Path: ticketPath, Status: "completed"},
@@ -4108,7 +4282,6 @@ func TestBuildPreviousTicketContext_PathOnly(t *testing.T) {
 // included regardless of whether the file exists (since we only inject paths).
 func TestBuildPreviousTicketContext_MissingFile(t *testing.T) {
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/current.md", Status: "working"},
 			{Path: "/nonexistent/ticket.md", Status: "completed"},
@@ -4145,7 +4318,6 @@ func TestWorkerLoop_SkipsCompletedTickets(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: completedTicket, Workspace: "testws", Status: "completed"},
 			{Path: pendingTicket, Workspace: "testws", Status: "pending"},
@@ -4346,27 +4518,7 @@ func TestViewShortcuts_EnterAndExit(t *testing.T) {
 	}
 }
 
-func TestClearShortcuts(t *testing.T) {
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "queue.json")
-
-	items := []list.Item{
-		tuiTicketItem{title: "Test", status: "created", filePath: "/tmp/test.md"},
-	}
-	m := newTestTuiModelWithItems(items)
-	m.queueShortcuts = []string{"old shortcut"}
-
-	// Write initial state so writeQueueFile has a valid path (we test in-memory here)
-	// Press C to clear shortcuts
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
-	updated := newModel.(tuiModel)
-	if len(updated.queueShortcuts) != 0 {
-		t.Errorf("shortcuts after C = %v, want empty", updated.queueShortcuts)
-	}
-
-	// Verify shortcut text is empty
-	_ = path // just satisfying the unused import check
-}
+// TestClearShortcuts removed — C key now enters comment mode instead of clearing shortcuts.
 
 func TestShortcutsText_Empty(t *testing.T) {
 	text := shortcutsText(nil)
@@ -4443,13 +4595,13 @@ func TestSyncFromQueueFile_PicksUpShortcuts(t *testing.T) {
 	}
 }
 
-func TestHelpText_IncludesShortcutsKeys(t *testing.T) {
+func TestHelpText_IncludesKeyBindings(t *testing.T) {
 	text := helpText()
-	if !strings.Contains(text, "c") || !strings.Contains(text, "shortcuts") {
-		t.Error("helpText should mention 'c' key for shortcuts")
+	if !strings.Contains(text, "c") || !strings.Contains(text, "clipboard") {
+		t.Error("helpText should mention 'c' key for clipboard copy")
 	}
-	if !strings.Contains(text, "C") {
-		t.Error("helpText should mention 'C' key for clearing shortcuts")
+	if !strings.Contains(text, "C") || !strings.Contains(text, "comment") {
+		t.Error("helpText should mention 'C' key for comment")
 	}
 }
 
@@ -4501,7 +4653,6 @@ func TestRestoreQueueState_StaleTickets(t *testing.T) {
 		qf := QueueFile{
 			Name:         "Stale Queue",
 			Running:      true,
-			CurrentIndex: 0,
 			Tickets: []QueueTicket{
 				{Path: "/nonexistent/ticket1.md", Workspace: "gone", Status: "working"},
 				{Path: "/nonexistent/ticket2.md", Workspace: "gone", Status: "pending"},
@@ -4541,10 +4692,10 @@ func TestShortcutsEqual(t *testing.T) {
 		{nil, nil, true},
 		{nil, []string{}, true},
 		{[]string{"a"}, []string{"a"}, true},
-		{[]string{"a"}, []string{"b"}, false},             // same length, different content
-		{[]string{"a", "b"}, []string{"a"}, false},         // different length
-		{[]string{"a", "b"}, []string{"a", "b"}, true},     // same
-		{[]string{"a", "b"}, []string{"b", "a"}, false},    // same content, different order
+		{[]string{"a"}, []string{"b"}, false},           // same length, different content
+		{[]string{"a", "b"}, []string{"a"}, false},      // different length
+		{[]string{"a", "b"}, []string{"a", "b"}, true},  // same
+		{[]string{"a", "b"}, []string{"b", "a"}, false}, // same content, different order
 		{[]string{"x"}, []string{"x", "y"}, false},
 	}
 	for i, tt := range tests {
@@ -4633,7 +4784,6 @@ func TestWorkerLoop_ReReadsQueueAfterProcessing(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -4747,7 +4897,6 @@ func TestWorkerLoop_TicketRemovedDuringProcessing(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -4764,7 +4913,6 @@ func TestWorkerLoop_TicketRemovedDuringProcessing(t *testing.T) {
 			qfMod := &QueueFile{
 				Name:         "Test Queue",
 				Running:      true,
-				CurrentIndex: 0,
 				Tickets: []QueueTicket{
 					{Path: ticket2, Workspace: "testws", Status: "pending"},
 				},
@@ -4808,7 +4956,6 @@ func TestWorkerLoop_AllTicketsAlreadyCompleted(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/t1.md", Workspace: "ws", Status: "completed"},
 			{Path: "/tmp/t2.md", Workspace: "ws", Status: "completed"},
@@ -4836,9 +4983,9 @@ func TestWorkerLoop_AllTicketsAlreadyCompleted(t *testing.T) {
 	}
 }
 
-// TestWorkerLoop_RunnerFailsAllTickets verifies that the worker advances through
-// the whole queue even when all tickets fail.
-func TestWorkerLoop_RunnerFailsAllTickets(t *testing.T) {
+// TestWorkerLoop_RunnerFailsRetriesTicket verifies that when a ticket fails,
+// the worker keeps it as "pending" and retries it (instead of advancing past it).
+func TestWorkerLoop_RunnerFailsRetriesTicket(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
 
@@ -4850,20 +4997,13 @@ func TestWorkerLoop_RunnerFailsAllTickets(t *testing.T) {
 	os.WriteFile(filepath.Join(wsDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
 
 	ticket1 := filepath.Join(ticketsDir, "0001_A.md")
-	ticket2 := filepath.Join(ticketsDir, "0002_B.md")
-	ticket3 := filepath.Join(ticketsDir, "0003_C.md")
 	os.WriteFile(ticket1, []byte("---\nStatus: created\nCurIteration: 0\n---\n# A\n"), 0644)
-	os.WriteFile(ticket2, []byte("---\nStatus: created\nCurIteration: 0\n---\n# B\n"), 0644)
-	os.WriteFile(ticket3, []byte("---\nStatus: created\nCurIteration: 0\n---\n# C\n"), 0644)
 
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 2,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
-			{Path: ticket2, Workspace: "testws", Status: "pending"},
-			{Path: ticket3, Workspace: "testws", Status: "pending"},
 		},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -4874,13 +5014,10 @@ func TestWorkerLoop_RunnerFailsAllTickets(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
+		// Cancel after the runner has been called at least 2 times (proving retry)
 		for {
 			time.Sleep(200 * time.Millisecond)
-			qf2, err := readQueueFileFromPath(queuePath)
-			if err != nil {
-				continue
-			}
-			if allTicketsProcessed(qf2) {
+			if len(runner.calls) >= 2 {
 				cancel()
 				return
 			}
@@ -4889,17 +5026,15 @@ func TestWorkerLoop_RunnerFailsAllTickets(t *testing.T) {
 
 	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
 
-	// All 3 tickets should have been attempted
-	if len(runner.calls) != 3 {
-		t.Errorf("runner called %d times, want 3 (should attempt all tickets even on failure)", len(runner.calls))
+	// Runner should have been called multiple times (retries on failure)
+	if len(runner.calls) < 2 {
+		t.Errorf("runner called %d times, want >= 2 (should retry pending ticket)", len(runner.calls))
 	}
 
-	// All tickets should be "failed"
+	// Ticket should remain "pending" (stays pending for retry, not terminal)
 	finalQf, _ := readQueueFileFromPath(queuePath)
-	for i, ticket := range finalQf.Tickets {
-		if ticket.Status != "failed" {
-			t.Errorf("Tickets[%d].Status = %q, want 'failed'", i, ticket.Status)
-		}
+	if finalQf.Tickets[0].Status != "pending" {
+		t.Errorf("Tickets[0].Status = %q, want 'pending'", finalQf.Tickets[0].Status)
 	}
 	if !finalQf.Running {
 		t.Error("queue should stay running (waits for new items)")
@@ -5069,7 +5204,6 @@ func TestSyncFromQueueFile_ExtraTicketsInFile(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "working"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "pending"},
@@ -5111,7 +5245,6 @@ func TestSyncFromQueueFile_FewerTicketsInFile(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "working"},
 		},
@@ -5137,6 +5270,59 @@ func TestSyncFromQueueFile_FewerTicketsInFile(t *testing.T) {
 	}
 }
 
+// TestSyncFromQueueFile_RePersistsMissingItems verifies that when the TUI has
+// items in its queue that are missing from the queue file (e.g., clobbered by
+// a worker write race condition), the TUI re-persists them to disk.
+func TestSyncFromQueueFile_RePersistsMissingItems(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "queue.json")
+
+	// TUI has A and B in queue
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "created", filePath: "/tmp/a.md", selected: true},
+		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md", selected: true},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+	m.currentQueueIdx = 0
+	m.activeQueueID = filepath.Base(tmpDir) // must match for writeQueueFile
+
+	// Queue file only has A (B was clobbered by worker heartbeat race)
+	qf := &QueueFile{
+		Name:    "Test",
+		Running: true,
+		Tickets: []QueueTicket{
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "pending"},
+		},
+	}
+	writeQueueFileDataToPath(qf, path)
+
+	// Override queueFilePathForID to return our test path
+	m.syncFromQueueFileAtPath(path)
+
+	// After sync, the queue file should be re-persisted with both A and B
+	reread, err := readQueueFileFromPath(path)
+	if err != nil {
+		t.Fatalf("could not re-read queue file: %v", err)
+	}
+	if len(reread.Tickets) != 2 {
+		t.Fatalf("expected 2 tickets in re-persisted file, got %d", len(reread.Tickets))
+	}
+	foundA, foundB := false, false
+	for _, qt := range reread.Tickets {
+		if qt.Path == "/tmp/a.md" {
+			foundA = true
+		}
+		if qt.Path == "/tmp/b.md" {
+			foundB = true
+		}
+	}
+	if !foundA || !foundB {
+		t.Errorf("expected both A and B in re-persisted file, foundA=%v foundB=%v", foundA, foundB)
+	}
+}
+
 // TestQueueFileRoundTrip_AllFields verifies that all queue file fields survive a read/write cycle.
 func TestQueueFileRoundTrip_AllFields(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -5147,10 +5333,9 @@ func TestQueueFileRoundTrip_AllFields(t *testing.T) {
 		Prompt:       "Always run tests",
 		Shortcuts:    []string{"shortcut 1", "shortcut 2"},
 		Running:      true,
-		CurrentIndex: 2,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws1", Status: "completed"},
-			{Path: "/tmp/b.md", Workspace: "ws2", Status: "failed"},
+			{Path: "/tmp/b.md", Workspace: "ws2", Status: "pending"},
 			{Path: "/tmp/c.md", Workspace: "ws1", Status: "working"},
 			{Path: "/tmp/d.md", Workspace: "ws2", Status: "pending"},
 		},
@@ -5175,9 +5360,6 @@ func TestQueueFileRoundTrip_AllFields(t *testing.T) {
 	}
 	if loaded.Running != original.Running {
 		t.Errorf("Running = %v, want %v", loaded.Running, original.Running)
-	}
-	if loaded.CurrentIndex != original.CurrentIndex {
-		t.Errorf("CurrentIndex = %d, want %d", loaded.CurrentIndex, original.CurrentIndex)
 	}
 	if len(loaded.Tickets) != len(original.Tickets) {
 		t.Fatalf("Tickets len = %d, want %d", len(loaded.Tickets), len(original.Tickets))
@@ -5211,7 +5393,6 @@ func TestWorkerLoop_QueueStoppedMidProcessing(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -5343,7 +5524,6 @@ func TestSelectDeselectSameTicket(t *testing.T) {
 // TestBuildPreviousTicketContext_EmptyQueue verifies handling of a queue with no completed tickets.
 func TestBuildPreviousTicketContext_EmptyQueue(t *testing.T) {
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/current.md", Status: "working"},
 		},
@@ -5354,20 +5534,19 @@ func TestBuildPreviousTicketContext_EmptyQueue(t *testing.T) {
 	}
 }
 
-// TestBuildPreviousTicketContext_FailedTicketsExcluded verifies that failed tickets
+// TestBuildPreviousTicketContext_PendingTicketsExcluded verifies that pending tickets
 // are NOT included in previous ticket context.
-func TestBuildPreviousTicketContext_FailedTicketsExcluded(t *testing.T) {
+func TestBuildPreviousTicketContext_PendingTicketsExcluded(t *testing.T) {
 	qf := &QueueFile{
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/current.md", Status: "working"},
 			{Path: "/tmp/completed.md", Status: "completed"},
-			{Path: "/tmp/failed.md", Status: "failed"},
+			{Path: "/tmp/pending.md", Status: "pending"},
 		},
 	}
 	ctx := buildPreviousTicketContext(qf)
-	if strings.Contains(ctx, "failed.md") {
-		t.Error("failed tickets should not be included in previous context")
+	if strings.Contains(ctx, "pending.md") {
+		t.Error("pending tickets should not be included in previous context")
 	}
 	if !strings.Contains(ctx, "completed.md") {
 		t.Error("completed tickets should be included in previous context")
@@ -5382,7 +5561,6 @@ func TestAdvanceQueue_SingleTicket(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "One Ticket",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/only.md", Status: "completed"},
 		},
@@ -5391,9 +5569,6 @@ func TestAdvanceQueue_SingleTicket(t *testing.T) {
 	advanceQueueToPath(qf, path)
 	if !qf.Running {
 		t.Error("queue should stay running (waits for new items)")
-	}
-	if qf.CurrentIndex != -1 {
-		t.Errorf("CurrentIndex = %d, want -1", qf.CurrentIndex)
 	}
 }
 
@@ -5405,7 +5580,6 @@ func TestAdvanceQueue_EmptyTicketList(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Empty",
 		Running:      true,
-		CurrentIndex: -1,
 		Tickets:      []QueueTicket{},
 	}
 
@@ -5418,11 +5592,11 @@ func TestAdvanceQueue_EmptyTicketList(t *testing.T) {
 
 // === Bug fix tests (iteration 23) ===
 
-// TestReorderDown_WhileRunning_CurrentFollows verifies that alt+down in queue tab
-// while running correctly updates currentQueueIdx to follow the current ticket.
-func TestReorderDown_WhileRunning_CurrentFollows(t *testing.T) {
+// TestReorderDown_WhileRunning_WorkingIsImmutable verifies that alt+down on the
+// working ticket is blocked (working tickets are immutable).
+func TestReorderDown_WhileRunning_WorkingIsImmutable(t *testing.T) {
 	items := []list.Item{
-		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true},
+		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true, workerStatus: "working"},
 		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true},
 		tuiTicketItem{title: "T3", filePath: "/tmp/t3.md", workspace: "ws", selected: true},
 	}
@@ -5430,104 +5604,80 @@ func TestReorderDown_WhileRunning_CurrentFollows(t *testing.T) {
 	m.queue.SetItems(items)
 	m.tab = tuiTabQueue
 	m.queueRunning = true
-	m.currentQueueIdx = 0 // T1 is current
+	m.currentQueueIdx = 0 // T1 is current (workerStatus="working")
 	m.syncQueueCurrentMarker()
 
-	// Move T1 (at index 0) down — T1 is the current ticket
+	// Try to move T1 (working) down — should be blocked
 	m.queue.Select(0)
 	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
 	m = newModel.(tuiModel)
 
-	// After swap: [T2, T1, T3]
-	// currentQueueIdx should follow T1 to position 1
-	if m.currentQueueIdx != 1 {
-		t.Errorf("currentQueueIdx=%d, want 1 (should follow T1)", m.currentQueueIdx)
+	// Order should be unchanged — working ticket is immutable
+	if m.currentQueueIdx != 0 {
+		t.Errorf("currentQueueIdx=%d, want 0 (working ticket should not move)", m.currentQueueIdx)
 	}
 	qItems := m.queue.Items()
-	if qItems[0].(tuiTicketItem).title != "T2" {
-		t.Errorf("queue[0]=%q, want T2", qItems[0].(tuiTicketItem).title)
-	}
-	if qItems[1].(tuiTicketItem).title != "T1" {
-		t.Errorf("queue[1]=%q, want T1", qItems[1].(tuiTicketItem).title)
-	}
-	// T1 at position 1 should have current=true
-	if !qItems[1].(tuiTicketItem).current {
-		t.Error("T1 at position 1 should have current=true")
-	}
-	// T2 at position 0 should have current=false
-	if qItems[0].(tuiTicketItem).current {
-		t.Error("T2 at position 0 should have current=false")
+	if qItems[0].(tuiTicketItem).title != "T1" {
+		t.Errorf("queue[0]=%q, want T1 (should not have moved)", qItems[0].(tuiTicketItem).title)
 	}
 }
 
-// TestReorderUp_WhileRunning_CurrentFollows verifies that alt+up in queue tab
-// while running correctly updates currentQueueIdx to follow the current ticket.
-func TestReorderUp_WhileRunning_CurrentFollows(t *testing.T) {
+// TestReorderUp_WhileRunning_WorkingIsImmutable verifies that alt+up on the
+// working ticket is blocked (working tickets are immutable).
+func TestReorderUp_WhileRunning_WorkingIsImmutable(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true},
 		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true},
-		tuiTicketItem{title: "T3", filePath: "/tmp/t3.md", workspace: "ws", selected: true},
+		tuiTicketItem{title: "T3", filePath: "/tmp/t3.md", workspace: "ws", selected: true, workerStatus: "working"},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
 	m.tab = tuiTabQueue
 	m.queueRunning = true
-	m.currentQueueIdx = 2 // T3 is current
+	m.currentQueueIdx = 2 // T3 is current (workerStatus="working")
 	m.syncQueueCurrentMarker()
 
-	// Move T3 (at index 2) up — T3 is the current ticket
+	// Try to move T3 (working) up — should be blocked
 	m.queue.Select(2)
 	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
 	m = newModel.(tuiModel)
 
-	// After swap: [T1, T3, T2]
-	// currentQueueIdx should follow T3 to position 1
-	if m.currentQueueIdx != 1 {
-		t.Errorf("currentQueueIdx=%d, want 1 (should follow T3)", m.currentQueueIdx)
+	// Order should be unchanged — working ticket is immutable
+	if m.currentQueueIdx != 2 {
+		t.Errorf("currentQueueIdx=%d, want 2 (working ticket should not move)", m.currentQueueIdx)
 	}
 	qItems := m.queue.Items()
-	if qItems[1].(tuiTicketItem).title != "T3" {
-		t.Errorf("queue[1]=%q, want T3", qItems[1].(tuiTicketItem).title)
-	}
-	// T3 at position 1 should have current=true
-	if !qItems[1].(tuiTicketItem).current {
-		t.Error("T3 at position 1 should have current=true")
+	if qItems[2].(tuiTicketItem).title != "T3" {
+		t.Errorf("queue[2]=%q, want T3 (should not have moved)", qItems[2].(tuiTicketItem).title)
 	}
 }
 
-// TestReorderDown_WhileRunning_NonCurrentSwapWithCurrent verifies reordering
-// a non-current ticket into the current position updates currentQueueIdx correctly.
-func TestReorderDown_WhileRunning_NonCurrentSwapWithCurrent(t *testing.T) {
+// TestReorderDown_WhileRunning_NonCurrentSwapWithWorking verifies that swapping
+// a non-current ticket with the working ticket is blocked (working is immutable).
+func TestReorderDown_WhileRunning_NonCurrentSwapWithWorking(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true},
-		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true},
+		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true, workerStatus: "working"},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
 	m.tab = tuiTabQueue
 	m.queueRunning = true
-	m.currentQueueIdx = 1 // T2 is current
+	m.currentQueueIdx = 1 // T2 is current (workerStatus="working")
 	m.syncQueueCurrentMarker()
 
-	// Move T1 (at index 0) down — swaps with T2 (current)
+	// Try to move T1 (at index 0) down — would swap with T2 (working/immutable)
 	m.queue.Select(0)
 	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown, Alt: true})
 	m = newModel.(tuiModel)
 
-	// After swap: [T2, T1]
-	// currentQueueIdx should follow T2 to position 0
-	if m.currentQueueIdx != 0 {
-		t.Errorf("currentQueueIdx=%d, want 0 (should follow T2)", m.currentQueueIdx)
+	// Order should be unchanged — working ticket blocks the swap
+	if m.currentQueueIdx != 1 {
+		t.Errorf("currentQueueIdx=%d, want 1 (working ticket should not move)", m.currentQueueIdx)
 	}
 	qItems := m.queue.Items()
-	if qItems[0].(tuiTicketItem).title != "T2" {
-		t.Errorf("queue[0]=%q, want T2", qItems[0].(tuiTicketItem).title)
-	}
-	if !qItems[0].(tuiTicketItem).current {
-		t.Error("T2 at position 0 should have current=true")
-	}
-	if qItems[1].(tuiTicketItem).current {
-		t.Error("T1 at position 1 should have current=false")
+	if qItems[0].(tuiTicketItem).title != "T1" {
+		t.Errorf("queue[0]=%q, want T1 (should not have swapped)", qItems[0].(tuiTicketItem).title)
 	}
 }
 
@@ -5535,7 +5685,7 @@ func TestReorderDown_WhileRunning_NonCurrentSwapWithCurrent(t *testing.T) {
 // that don't involve the current ticket doesn't affect currentQueueIdx.
 func TestReorderDown_WhileRunning_NoCurrentInvolved(t *testing.T) {
 	items := []list.Item{
-		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true},
+		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", selected: true, workerStatus: "working"},
 		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", selected: true},
 		tuiTicketItem{title: "T3", filePath: "/tmp/t3.md", workspace: "ws", selected: true},
 	}
@@ -5543,7 +5693,7 @@ func TestReorderDown_WhileRunning_NoCurrentInvolved(t *testing.T) {
 	m.queue.SetItems(items)
 	m.tab = tuiTabQueue
 	m.queueRunning = true
-	m.currentQueueIdx = 0 // T1 is current
+	m.currentQueueIdx = 0 // T1 is current (workerStatus="working")
 	m.syncQueueCurrentMarker()
 
 	// Move T2 (at index 1) down — neither T2 nor T3 is current
@@ -5605,12 +5755,11 @@ func TestReorder_BlockedForFinishedFrontmatterStatus(t *testing.T) {
 }
 
 // TestReorder_BlockedForFinishedWorkerStatus verifies that tickets with terminal
-// workerStatus (completed/failed) cannot be reordered.
+// workerStatus (completed) cannot be reordered.
 func TestReorder_BlockedForFinishedWorkerStatus(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "Pending", filePath: "/tmp/pending.md", workspace: "ws", status: "created", selected: true},
 		tuiTicketItem{title: "WorkerDone", filePath: "/tmp/wdone.md", workspace: "ws", status: "created", workerStatus: "completed", selected: true},
-		tuiTicketItem{title: "WorkerFailed", filePath: "/tmp/wfail.md", workspace: "ws", status: "created", workerStatus: "failed", selected: true},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
@@ -5623,15 +5772,6 @@ func TestReorder_BlockedForFinishedWorkerStatus(t *testing.T) {
 	qItems := updated.queue.Items()
 	if qItems[1].(tuiTicketItem).title != "WorkerDone" {
 		t.Errorf("expected WorkerDone at index 1, got %q — workerStatus=completed should not move", qItems[1].(tuiTicketItem).title)
-	}
-
-	// Try to move workerStatus=failed (index 2) up into workerStatus=completed — both blocked
-	updated.queue.Select(2)
-	newModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyUp, Alt: true})
-	updated = newModel.(tuiModel)
-	qItems = updated.queue.Items()
-	if qItems[2].(tuiTicketItem).title != "WorkerFailed" {
-		t.Errorf("expected WorkerFailed at index 2, got %q — workerStatus=failed should not move", qItems[2].(tuiTicketItem).title)
 	}
 }
 
@@ -5696,9 +5836,8 @@ func TestIsTicketFinished(t *testing.T) {
 		{"completed", tuiTicketItem{status: "completed"}, true},
 		{"completed + verified", tuiTicketItem{status: "completed + verified"}, true},
 		{"workerStatus completed", tuiTicketItem{status: "created", workerStatus: "completed"}, true},
-		{"workerStatus failed", tuiTicketItem{status: "created", workerStatus: "failed"}, true},
-		{"workerStatus working", tuiTicketItem{status: "created", workerStatus: "working"}, false},
 		{"workerStatus pending", tuiTicketItem{status: "created", workerStatus: "pending"}, false},
+		{"workerStatus working", tuiTicketItem{status: "created", workerStatus: "working"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -5723,9 +5862,8 @@ func TestIsTicketImmutable(t *testing.T) {
 		{"completed", tuiTicketItem{status: "completed"}, true},
 		{"completed + verified", tuiTicketItem{status: "completed + verified"}, true},
 		{"workerStatus completed", tuiTicketItem{status: "created", workerStatus: "completed"}, true},
-		{"workerStatus failed", tuiTicketItem{status: "created", workerStatus: "failed"}, true},
-		{"workerStatus working", tuiTicketItem{status: "created", workerStatus: "working"}, true},
 		{"workerStatus pending", tuiTicketItem{status: "created", workerStatus: "pending"}, false},
+		{"workerStatus working", tuiTicketItem{status: "created", workerStatus: "working"}, true},
 		{"draft", tuiTicketItem{status: "created", isDraft: true}, false},
 	}
 	for _, tt := range tests {
@@ -5859,12 +5997,12 @@ func TestValidateQueueOrdering(t *testing.T) {
 			true,
 		},
 		{
-			"worker failed above pending — INVALID",
+			"worker pending above pending — valid (both mutable)",
 			[]list.Item{
-				tuiTicketItem{title: "Failed", status: "created", workerStatus: "failed"},
+				tuiTicketItem{title: "PendingWorker", status: "created", workerStatus: "pending"},
 				tuiTicketItem{title: "Pending", status: "created"},
 			},
-			false,
+			true,
 		},
 	}
 	for _, tt := range tests {
@@ -5886,7 +6024,7 @@ func TestEnforceQueueOrdering(t *testing.T) {
 		tuiTicketItem{title: "Active", status: "created", workerStatus: "working", filePath: "/tmp/active.md"},
 	}
 
-	newItems, newIdx := enforceQueueOrdering(items, 2)
+	newItems := enforceQueueOrdering(items)
 
 	// Verify ordering: mutable first, then immutable
 	if newItems[0].(tuiTicketItem).title != "Pending" {
@@ -5902,9 +6040,6 @@ func TestEnforceQueueOrdering(t *testing.T) {
 	}
 
 	// currentQueueIdx should follow the active item
-	if newIdx != 2 {
-		t.Errorf("expected currentQueueIdx=2, got %d", newIdx)
-	}
 
 	// Verify the result is now valid
 	if !validateQueueOrdering(newItems) {
@@ -5920,7 +6055,7 @@ func TestEnforceQueueOrdering_AlreadyValid(t *testing.T) {
 		tuiTicketItem{title: "Done", status: "completed"},
 	}
 
-	newItems, newIdx := enforceQueueOrdering(items, 1)
+	newItems := enforceQueueOrdering(items)
 
 	// Should be unchanged
 	for i, qi := range newItems {
@@ -5928,9 +6063,6 @@ func TestEnforceQueueOrdering_AlreadyValid(t *testing.T) {
 			t.Errorf("index %d: expected %q, got %q — valid ordering should not change",
 				i, items[i].(tuiTicketItem).title, qi.(tuiTicketItem).title)
 		}
-	}
-	if newIdx != 1 {
-		t.Errorf("expected currentQueueIdx=1 (unchanged), got %d", newIdx)
 	}
 }
 
@@ -5941,7 +6073,7 @@ func TestStartQueue_ResetsWorkerStatuses(t *testing.T) {
 		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws", status: "created",
 			selected: true, workerStatus: "completed"},
 		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws", status: "created",
-			selected: true, workerStatus: "failed"},
+			selected: true, workerStatus: "pending"},
 		tuiTicketItem{title: "T3", filePath: "/tmp/t3.md", workspace: "ws", status: "created",
 			selected: true, workerStatus: ""},
 	}
@@ -5974,7 +6106,7 @@ func TestStartQueue_ResetsAllWorkerStatuses(t *testing.T) {
 		tuiTicketItem{title: "Completed", filePath: "/tmp/ctx.md", workspace: "ws",
 			status: "completed + verified", selected: true, workerStatus: "completed"},
 		tuiTicketItem{title: "New", filePath: "/tmp/new.md", workspace: "ws",
-			status: "created", selected: true, workerStatus: "failed"},
+			status: "created", selected: true, workerStatus: "pending"},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
@@ -5998,7 +6130,7 @@ func TestStartQueue_ResetsAllWorkerStatuses(t *testing.T) {
 func TestBuildQueueFileFromModel(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workspace: "ws",
-			status: "created", workerStatus: "failed", selected: true},
+			status: "created", workerStatus: "pending", selected: true},
 		tuiTicketItem{title: "T2", filePath: "/tmp/t2.md", workspace: "ws",
 			status: "completed + verified", workerStatus: "", selected: true},
 	}
@@ -6024,15 +6156,12 @@ func TestBuildQueueFileFromModel(t *testing.T) {
 	if !qf.Running {
 		t.Error("Running should be true")
 	}
-	if qf.CurrentIndex != 0 {
-		t.Errorf("CurrentIndex=%d, want 0", qf.CurrentIndex)
-	}
 	if len(qf.Tickets) != 2 {
 		t.Fatalf("got %d tickets, want 2", len(qf.Tickets))
 	}
-	// T1 has workerStatus="failed" which should be preserved
-	if qf.Tickets[0].Status != "failed" {
-		t.Errorf("ticket[0] status=%q, want 'failed'", qf.Tickets[0].Status)
+	// T1 has workerStatus="pending", and is the current index — should be "working"
+	if qf.Tickets[0].Status != "working" {
+		t.Errorf("ticket[0] status=%q, want 'working' (current index)", qf.Tickets[0].Status)
 	}
 	// T2 has frontmatter "completed + verified" and empty workerStatus — should be "completed"
 	if qf.Tickets[1].Status != "completed" {
@@ -6072,9 +6201,6 @@ func TestReorderDown_WhileRunning_QueueFileReflectsCurrent(t *testing.T) {
 		t.Fatalf("readQueueFileFromPath: %v", err)
 	}
 	// T1 should now be at position 1, and current_index should be 1
-	if qf.CurrentIndex != 1 {
-		t.Errorf("current_index=%d, want 1", qf.CurrentIndex)
-	}
 	if qf.Tickets[1].Path != "/tmp/t1.md" {
 		t.Errorf("ticket[1].path=%q, want /tmp/t1.md", qf.Tickets[1].Path)
 	}
@@ -6105,7 +6231,6 @@ func TestWorkerLoop_TicketRemovedDoesNotSkipNext(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -6123,7 +6248,6 @@ func TestWorkerLoop_TicketRemovedDoesNotSkipNext(t *testing.T) {
 			qfMod := &QueueFile{
 				Name:         "Test Queue",
 				Running:      true,
-				CurrentIndex: 0,
 				Tickets: []QueueTicket{
 					{Path: ticket1, Workspace: "testws", Status: "pending"},
 				},
@@ -6226,7 +6350,6 @@ func TestWorkerLoop_RespectsMinIterations(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 		},
@@ -6286,7 +6409,6 @@ func TestWorkerLoop_MinIterationsMetThenCompletes(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 		},
@@ -6339,7 +6461,7 @@ func TestQueueStatusBadges(t *testing.T) {
 	m.queue.SetItems([]list.Item{
 		tuiTicketItem{title: "T1", workerStatus: "completed"},
 		tuiTicketItem{title: "T2", workerStatus: "completed"},
-		tuiTicketItem{title: "T3", workerStatus: "failed"},
+		tuiTicketItem{title: "T3", workerStatus: "pending"},
 		tuiTicketItem{title: "T4", workerStatus: "pending"},
 		tuiTicketItem{title: "T5", workerStatus: ""},
 	})
@@ -6347,11 +6469,8 @@ func TestQueueStatusBadges(t *testing.T) {
 	if !strings.Contains(got, "◆2") {
 		t.Errorf("badges=%q, want to contain ◆2", got)
 	}
-	if !strings.Contains(got, "✗1") {
-		t.Errorf("badges=%q, want to contain ✗1", got)
-	}
-	if !strings.Contains(got, "○2") {
-		t.Errorf("badges=%q, want to contain ○2 (pending + empty)", got)
+	if !strings.Contains(got, "○3") {
+		t.Errorf("badges=%q, want to contain ○3 (pending + empty)", got)
 	}
 }
 
@@ -6379,19 +6498,16 @@ func TestTabBar_ShowsStatusBadges(t *testing.T) {
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems([]list.Item{
 		tuiTicketItem{title: "T1", workerStatus: "completed"},
-		tuiTicketItem{title: "T2", workerStatus: "failed"},
-		tuiTicketItem{title: "T3", workerStatus: "pending"},
+		tuiTicketItem{title: "T2", workerStatus: "pending"},
+		tuiTicketItem{title: "T3", workerStatus: ""},
 	})
 	m.tab = tuiTabQueue
 	got := m.tabBar()
 	if !strings.Contains(got, "◆1") {
 		t.Errorf("tab bar=%q, want to contain ◆1", got)
 	}
-	if !strings.Contains(got, "✗1") {
-		t.Errorf("tab bar=%q, want to contain ✗1", got)
-	}
-	if !strings.Contains(got, "○1") {
-		t.Errorf("tab bar=%q, want to contain ○1", got)
+	if !strings.Contains(got, "○2") {
+		t.Errorf("tab bar=%q, want to contain ○2", got)
 	}
 }
 
@@ -6410,7 +6526,7 @@ func TestQueueStatusBadges_WorkingCountsAsPending(t *testing.T) {
 // --- Iteration 25: Bug bashing — Worker WorkDir, bounds checks, stty sane, edge case tests ---
 
 // TestBuildPreviousTicketContext_BoundsCheck verifies buildPreviousTicketContext
-// doesn't panic when CurrentIndex exceeds len(Tickets) (corrupt queue file).
+// doesn't panic when ticket statuses are inconsistent (corrupt queue file).
 func TestBuildPreviousTicketContext_BoundsCheck(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -6422,29 +6538,27 @@ func TestBuildPreviousTicketContext_BoundsCheck(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Status: "completed"},
 		},
-		CurrentIndex: 999, // Way out of bounds
 		Running:      true,
 	}
 
 	// Should not panic — bounds safety is the real test
-	// Stateless function looks at statuses, not CurrentIndex, so completed ticket is included
+	// Stateless function looks at statuses, so completed ticket is included
 	result := buildPreviousTicketContext(qf)
 	if !strings.Contains(result, ticketPath) {
 		t.Errorf("expected completed ticket in context, got: %s", result)
 	}
 }
 
-// TestBuildPreviousTicketContext_NegativeIndex verifies behavior with negative CurrentIndex.
+// TestBuildPreviousTicketContext_NegativeIndex verifies behavior when no tickets are pending.
 func TestBuildPreviousTicketContext_NegativeIndex(t *testing.T) {
 	qf := &QueueFile{
 		Tickets: []QueueTicket{
 			{Path: "/tmp/ticket.md", Status: "completed"},
 		},
-		CurrentIndex: -1,
 	}
 
 	// Stateless function looks at statuses, so completed ticket is included
-	// regardless of CurrentIndex
+	// regardless of ticket statuses
 	result := buildPreviousTicketContext(qf)
 	if !strings.Contains(result, "/tmp/ticket.md") {
 		t.Errorf("expected completed ticket in context, got: %s", result)
@@ -6474,7 +6588,6 @@ func TestWorkerLoop_WorkDirPassedToRunner(t *testing.T) {
 		Name:         "Test Queue",
 		Tickets:      []QueueTicket{{Path: ticketPath, Workspace: "testws", Status: "pending"}},
 		Running:      true,
-		CurrentIndex: 0,
 	}
 	data, _ := json.MarshalIndent(qf, "", "  ")
 	os.WriteFile(queuePath, data, 0644)
@@ -6513,13 +6626,12 @@ func TestWorkerLoop_WorkDirPassedToRunner(t *testing.T) {
 	}
 }
 
-// TestBuildPreviousTicketContext_ZeroIndex verifies no context when CurrentIndex is 0.
+// TestBuildPreviousTicketContext_ZeroIndex verifies no context when no tickets are completed.
 func TestBuildPreviousTicketContext_ZeroIndex(t *testing.T) {
 	qf := &QueueFile{
 		Tickets: []QueueTicket{
 			{Path: "/tmp/ticket.md", Status: "pending"},
 		},
-		CurrentIndex: 0,
 		Running:      true,
 	}
 
@@ -6551,7 +6663,6 @@ func TestWorkerLoop_NonExistentWorkspace(t *testing.T) {
 		Name:         "Test",
 		Tickets:      []QueueTicket{{Path: ticketPath, Workspace: "ghost", Status: "pending"}},
 		Running:      true,
-		CurrentIndex: 0,
 	}
 	data, _ := json.MarshalIndent(qf, "", "  ")
 	os.WriteFile(queuePath, data, 0644)
@@ -6601,7 +6712,6 @@ func TestWorkerLoop_EmptyTicketPath(t *testing.T) {
 		Name:         "Test",
 		Tickets:      []QueueTicket{{Path: "", Workspace: "", Status: "pending"}},
 		Running:      true,
-		CurrentIndex: 0,
 	}
 	data, _ := json.MarshalIndent(qf, "", "  ")
 	os.WriteFile(queuePath, data, 0644)
@@ -6632,9 +6742,9 @@ func TestWorkerLoop_EmptyTicketPath(t *testing.T) {
 	}
 }
 
-// TestAdvanceQueue_CurrentIndexAlreadyPastEnd verifies advanceQueue handles
-// a CurrentIndex that's already at or past the end of tickets.
-func TestAdvanceQueue_CurrentIndexAlreadyPastEnd(t *testing.T) {
+// TestAdvanceQueue_AllCompleted verifies advanceQueue handles
+// the case where all tickets are already completed.
+func TestAdvanceQueue_AllCompleted(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "queue.json")
 
@@ -6644,17 +6754,13 @@ func TestAdvanceQueue_CurrentIndexAlreadyPastEnd(t *testing.T) {
 			{Path: "/tmp/a.md", Status: "completed"},
 		},
 		Running:      true,
-		CurrentIndex: 0,
 	}
 
 	advanceQueueToPath(qf, path)
 
-	// All tickets completed — queue stays running but CurrentIndex = -1
+	// All tickets completed — queue stays running
 	if !qf.Running {
 		t.Error("queue should stay running (waits for new items)")
-	}
-	if qf.CurrentIndex != -1 {
-		t.Errorf("currentIndex=%d, want -1", qf.CurrentIndex)
 	}
 
 	// Verify file was written
@@ -6667,44 +6773,6 @@ func TestAdvanceQueue_CurrentIndexAlreadyPastEnd(t *testing.T) {
 	}
 }
 
-// TestSyncFromQueueFile_CorruptCurrentIndex verifies syncFromQueueFile handles
-// a queue file with CurrentIndex beyond the ticket list.
-func TestSyncFromQueueFile_CorruptCurrentIndex(t *testing.T) {
-	tmpDir := t.TempDir()
-	path := filepath.Join(tmpDir, "queue.json")
-
-	m := newTestTuiModelWithItems(nil)
-	m.queue.SetItems([]list.Item{
-		tuiTicketItem{title: "T1", filePath: "/tmp/t1.md", workerStatus: "pending"},
-	})
-	m.queueRunning = true
-	m.currentQueueIdx = 0
-
-	// Write a corrupt queue file with CurrentIndex way out of bounds
-	qf := &QueueFile{
-		Tickets: []QueueTicket{
-			{Path: "/tmp/t1.md", Status: "completed"},
-		},
-		Running:      false,
-		CurrentIndex: 999,
-	}
-	data, _ := json.MarshalIndent(qf, "", "  ")
-	os.WriteFile(path, data, 0644)
-
-	// Should not panic
-	m.syncFromQueueFileAtPath(path)
-
-	// Should have synced the worker status
-	item := m.queue.Items()[0].(tuiTicketItem)
-	if item.workerStatus != "completed" {
-		t.Errorf("workerStatus=%q, want completed", item.workerStatus)
-	}
-
-	// Should have detected worker finished (Running went false)
-	if m.queueRunning {
-		t.Error("queueRunning should be false after worker finished")
-	}
-}
 
 // TestWriteQueueFile_LargeQueue verifies writeQueueFile handles a queue with many items.
 func TestWriteQueueFile_LargeQueue(t *testing.T) {
@@ -6736,9 +6804,6 @@ func TestWriteQueueFile_LargeQueue(t *testing.T) {
 	}
 	if len(qf.Tickets) != 100 {
 		t.Errorf("got %d tickets, want 100", len(qf.Tickets))
-	}
-	if qf.CurrentIndex != 50 {
-		t.Errorf("currentIndex=%d, want 50", qf.CurrentIndex)
 	}
 	// Tickets before currentQueueIdx with no workerStatus should be "pending"
 	// (position-based "completed" was removed to fix reorder bug)
@@ -6815,7 +6880,6 @@ func TestAtomicWriteQueueFile(t *testing.T) {
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "pending"},
 		},
 		Running:      true,
-		CurrentIndex: 0,
 	}
 
 	err := writeQueueFileDataToPath(qf, path)
@@ -6930,7 +6994,6 @@ func TestSyncFromQueueFile_CrossSyncsWorkerStatusToAllList(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "working"},
@@ -7006,7 +7069,6 @@ func TestSyncFromQueueFile_RefreshesFrontmatterStatus(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Workspace: "ws", Status: "completed"},
 		},
@@ -7031,9 +7093,9 @@ func TestSyncFromQueueFile_RefreshesFrontmatterStatus(t *testing.T) {
 	}
 }
 
-// TestSyncFromQueueFile_RefreshesStatusOnFailed verifies frontmatter refresh
-// also works when worker reports "failed" status.
-func TestSyncFromQueueFile_RefreshesStatusOnFailed(t *testing.T) {
+// TestSyncFromQueueFile_RefreshesStatusOnPending verifies frontmatter refresh
+// also works when worker reports "pending" status (after error).
+func TestSyncFromQueueFile_RefreshesStatusOnPending(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
 	ticketPath := filepath.Join(tmpDir, "ticket_a.md")
@@ -7047,25 +7109,128 @@ func TestSyncFromQueueFile_RefreshesStatusOnFailed(t *testing.T) {
 	m := newTestTuiModelWithItems(items)
 	m.queue.SetItems(items)
 
-	// Simulate worker failing ticket
+	// Simulate worker setting ticket back to pending after error
 	qf := &QueueFile{
 		Name:    "Test",
 		Running: true,
 		Tickets: []QueueTicket{
-			{Path: ticketPath, Workspace: "ws", Status: "failed"},
+			{Path: ticketPath, Workspace: "ws", Status: "pending"},
 		},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 
 	m.syncFromQueueFileAtPath(queuePath)
 
-	// Queue item should have refreshed frontmatter status from "not completed" to "in_progress"
+	// Queue item workerStatus should be "pending"
 	qItem := m.queue.Items()[0].(tuiTicketItem)
-	if qItem.status != "in_progress" {
-		t.Errorf("queue item status=%q, want 'in_progress' (refreshed from disk)", qItem.status)
+	if qItem.workerStatus != "pending" {
+		t.Errorf("queue item workerStatus=%q, want 'pending'", qItem.workerStatus)
 	}
-	if qItem.workerStatus != "failed" {
-		t.Errorf("queue item workerStatus=%q, want 'failed'", qItem.workerStatus)
+}
+
+func TestSyncFromQueueFile_AdditionalRequestPendingResetsStatus(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+	ticketPath := filepath.Join(tmpDir, "ticket_a.md")
+
+	// Create ticket file (frontmatter not used for additional request status sync).
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed + verified\n---\n# Ticket A\n"), 0644)
+
+	// Seed DB with a pending additional request.
+	_, _ = database.CreateAdditionalRequest(context.Background(), ticketPath, 1, false, "Fix tests", "completed + verified")
+	_ = database.UpdateAdditionalRequestStatus(context.Background(), ticketPath, 1, "pending")
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "pending", filePath: ticketPath, requestNum: 1, selected: true},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+
+	// Queue file marks the request as pending (re-queued).
+	qf := &QueueFile{
+		Name:    "Test",
+		Running: true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "pending", RequestNum: 1},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	m.syncFromQueueFileAtPath(queuePath)
+
+	qItem := m.queue.Items()[0].(tuiTicketItem)
+	if qItem.status != "created" {
+		t.Errorf("queue item status=%q, want 'created' after pending re-queue", qItem.status)
+	}
+	if qItem.workerStatus != "pending" {
+		t.Errorf("queue item workerStatus=%q, want 'pending'", qItem.workerStatus)
+	}
+
+	// DB status should be updated to created as well.
+	req, err := database.GetAdditionalRequest(context.Background(), ticketPath, 1)
+	if err != nil {
+		t.Fatalf("GetAdditionalRequest: %v", err)
+	}
+	if req.Status != "created" {
+		t.Errorf("db status=%q, want 'created'", req.Status)
+	}
+}
+
+func TestSyncFromQueueFile_AdditionalRequestPendingResetsStatus_WhenWorkerStatusUnchanged(t *testing.T) {
+	cleanup := setupTestDB(t)
+	defer cleanup()
+
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+	ticketPath := filepath.Join(tmpDir, "ticket_a.md")
+
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed + verified\n---\n# Ticket A\n"), 0644)
+	_, _ = database.CreateAdditionalRequest(context.Background(), ticketPath, 1, false, "Fix tests", "completed + verified")
+	_ = database.UpdateAdditionalRequestStatus(context.Background(), ticketPath, 1, "pending")
+
+	// Simulate a post-restart state where workerStatus was restored from queue file
+	// as "pending", and additional request status is also stale as "pending".
+	items := []list.Item{
+		tuiTicketItem{
+			title:        "A",
+			status:       "pending",
+			filePath:     ticketPath,
+			requestNum:   1,
+			selected:     true,
+			workerStatus: "pending",
+		},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+
+	qf := &QueueFile{
+		Name:    "Test",
+		Running: true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "pending", RequestNum: 1},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	m.syncFromQueueFileAtPath(queuePath)
+
+	qItem := m.queue.Items()[0].(tuiTicketItem)
+	if qItem.status != "created" {
+		t.Errorf("queue item status=%q, want 'created' when workerStatus unchanged", qItem.status)
+	}
+	if qItem.workerStatus != "pending" {
+		t.Errorf("queue item workerStatus=%q, want 'pending'", qItem.workerStatus)
+	}
+
+	req, err := database.GetAdditionalRequest(context.Background(), ticketPath, 1)
+	if err != nil {
+		t.Fatalf("GetAdditionalRequest: %v", err)
+	}
+	if req.Status != "created" {
+		t.Errorf("db status=%q, want 'created'", req.Status)
 	}
 }
 
@@ -7150,7 +7315,6 @@ func TestMergeWorkerStatuses_PreservesCompletedOverWorking(t *testing.T) {
 	workerQf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "working"},
@@ -7187,9 +7351,10 @@ func TestMergeWorkerStatuses_PreservesCompletedOverWorking(t *testing.T) {
 	}
 }
 
-// TestMergeWorkerStatuses_PreservesFailedOverWorking verifies that "failed"
-// status from the worker is preserved over stale "working" in the TUI model.
-func TestMergeWorkerStatuses_PreservesFailedOverWorking(t *testing.T) {
+// TestMergeWorkerStatuses_DoesNotPreservePendingOverWorking verifies that "pending"
+// status from the worker is NOT preserved over "working" in the TUI model
+// (only "completed" is preserved by mergeWorkerStatuses).
+func TestMergeWorkerStatuses_DoesNotPreservePendingOverWorking(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
 
@@ -7197,7 +7362,7 @@ func TestMergeWorkerStatuses_PreservesFailedOverWorking(t *testing.T) {
 		Name:    "Test",
 		Running: true,
 		Tickets: []QueueTicket{
-			{Path: "/tmp/a.md", Workspace: "ws", Status: "failed"},
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "pending"},
 		},
 	}
 	writeQueueFileDataToPath(workerQf, queuePath)
@@ -7219,8 +7384,9 @@ func TestMergeWorkerStatuses_PreservesFailedOverWorking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readQueueFileFromPath: %v", err)
 	}
-	if qf.Tickets[0].Status != "failed" {
-		t.Errorf("ticket A status=%q, want 'failed' (preserved from existing file)", qf.Tickets[0].Status)
+	// "pending" from the existing file should NOT override "working" from the TUI model
+	if qf.Tickets[0].Status != "working" {
+		t.Errorf("ticket A status=%q, want 'working' (pending should not override working)", qf.Tickets[0].Status)
 	}
 }
 
@@ -7347,7 +7513,6 @@ func TestWriteQueueFile_RaceCondition_EndToEnd(t *testing.T) {
 	workerQf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: -1, // all done
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Workspace: "ws", Status: "completed"},
 		},
@@ -7424,7 +7589,6 @@ func TestWorkerLoop_PromptErrorUsessFreshQueueFile(t *testing.T) {
 		Name:         "Original Name",
 		Prompt:       "original prompt",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -7448,11 +7612,10 @@ func TestWorkerLoop_PromptErrorUsessFreshQueueFile(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		// Wait until both tickets are processed (failed + advanced through)
+		// Cancel after the prompt loader has been called at least once (proving the error path ran)
 		for {
 			time.Sleep(100 * time.Millisecond)
-			qfResult, err := readQueueFileFromPath(queuePath)
-			if err == nil && allTicketsProcessed(qfResult) {
+			if len(loader.calls) >= 1 {
 				cancel()
 				return
 			}
@@ -7471,12 +7634,6 @@ func TestWorkerLoop_PromptErrorUsessFreshQueueFile(t *testing.T) {
 	}
 	if len(qfResult.Shortcuts) != 1 || qfResult.Shortcuts[0] != "TUI-added shortcut" {
 		t.Errorf("Shortcuts=%v, want ['TUI-added shortcut'] (error path should preserve TUI changes)", qfResult.Shortcuts)
-	}
-	// Both tickets should be failed (prompt loading always fails)
-	for i, ticket := range qfResult.Tickets {
-		if ticket.Status != "failed" {
-			t.Errorf("Tickets[%d].Status=%q, want 'failed'", i, ticket.Status)
-		}
 	}
 }
 
@@ -7499,7 +7656,6 @@ func TestWorkerLoop_IncrementCurIterationAfterPromptBuild(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 		},
@@ -7511,10 +7667,10 @@ func TestWorkerLoop_IncrementCurIterationAfterPromptBuild(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
+		// Cancel after loader has been called at least once (ticket stays pending, retried)
 		for {
 			time.Sleep(100 * time.Millisecond)
-			qfResult, err := readQueueFileFromPath(queuePath)
-			if err == nil && allTicketsProcessed(qfResult) {
+			if len(loader.calls) >= 1 {
 				cancel()
 				return
 			}
@@ -7663,11 +7819,11 @@ func TestStartQueue_NoPendingStillStartsInWaiting(t *testing.T) {
 func TestStartQueue_ResetsAllStatusVariants(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "NotDone", filePath: "/tmp/nd.md", workspace: "ws",
-			status: "not completed", selected: true, workerStatus: "failed"},
+			status: "not completed", selected: true, workerStatus: "pending"},
 		tuiTicketItem{title: "Done", filePath: "/tmp/done.md", workspace: "ws",
 			status: "completed + verified", selected: true, workerStatus: "completed"},
 		tuiTicketItem{title: "New", filePath: "/tmp/new.md", workspace: "ws",
-			status: "created", selected: true, workerStatus: "failed"},
+			status: "created", selected: true, workerStatus: "pending"},
 	}
 	m := newTestTuiModelWithItems(nil)
 	m.queue.SetItems(items)
@@ -7750,7 +7906,6 @@ func TestWorkerLoop_PromptErrorSkipsAdvanceWhenTicketRemoved(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 2,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -7829,9 +7984,6 @@ func (r *removeTicketPromptLoader) Load(baseDir, promptFile, header string, tick
 				}
 			}
 			qf.Tickets = remaining
-			if qf.CurrentIndex >= len(qf.Tickets) {
-				qf.CurrentIndex = len(qf.Tickets) - 1
-			}
 			writeQueueFileDataToPath(qf, r.queuePath)
 		}
 		return "", fmt.Errorf("simulated prompt failure after ticket removal")
@@ -7895,7 +8047,6 @@ func TestRestoreQueueState_CurrentQueueIdxCapped(t *testing.T) {
 	qf := QueueFile{
 		Name:         "OOB Queue",
 		Running:      true,
-		CurrentIndex: 4,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "completed"},
 			{Path: "/nonexistent/ticket1.md", Workspace: "testws", Status: "completed"},
@@ -7969,7 +8120,6 @@ func TestWorkerSingleWriteOnAdvance(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "working"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -8049,7 +8199,6 @@ func TestAdvanceQueueIndex_NoWrite(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: "/a.md", Status: "pending"},
 			{Path: "/b.md", Status: "completed"},
@@ -8060,28 +8209,13 @@ func TestAdvanceQueueIndex_NoWrite(t *testing.T) {
 	// advanceQueueIndex now computes next pending ticket from statuses.
 	// Ticket[1] is completed, Ticket[0] is pending, so next should be 0.
 	advanceQueueIndex(qf)
-	if qf.CurrentIndex != 0 {
-		t.Errorf("CurrentIndex=%d after advance, want 0", qf.CurrentIndex)
-	}
 	if !qf.Running {
 		t.Error("Running should still be true")
-	}
-
-	// But the disk should still have the old state
-	diskQf, err := readQueueFileFromPath(queuePath)
-	if err != nil {
-		t.Fatalf("readQueueFile: %v", err)
-	}
-	if diskQf.CurrentIndex != 1 {
-		t.Errorf("disk CurrentIndex=%d, want 1 (should not have been written)", diskQf.CurrentIndex)
 	}
 
 	// Mark ticket[0] as completed too, advance should go to -1 but stay running
 	qf.Tickets[0].Status = "completed"
 	advanceQueueIndex(qf)
-	if qf.CurrentIndex != -1 {
-		t.Errorf("CurrentIndex=%d after advance past all, want -1", qf.CurrentIndex)
-	}
 	if !qf.Running {
 		t.Error("Running should stay true (waits for new items)")
 	}
@@ -8092,11 +8226,11 @@ func TestAdvanceQueueIndex_NoWrite(t *testing.T) {
 // verifyAwareMockRunner tracks work vs verify calls and can return different
 // exit codes for each.
 type verifyAwareMockRunner struct {
-	calls        []string // all prompts received
-	workCalls    int
-	verifyCalls  int
-	workExit     int // exit code for work prompts
-	verifyExit   int // exit code for verify prompts
+	calls       []string // all prompts received
+	workCalls   int
+	verifyCalls int
+	workExit    int // exit code for work prompts
+	verifyExit  int // exit code for verify prompts
 }
 
 func (r *verifyAwareMockRunner) Run(ctx context.Context, prompt string, args []string) (int, error) {
@@ -8132,7 +8266,6 @@ func TestWorkerVerification_WithVerifyPrompt(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -8193,7 +8326,6 @@ func TestWorkerVerification_VerifyFails(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -8281,7 +8413,6 @@ func TestWorkerVerification_ExitNeg1ButFrontmatterVerified(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -8344,7 +8475,6 @@ func TestWorkerVerification_SkipVerification(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -8408,7 +8538,6 @@ func TestWorkerVerification_NoVerifyPrompt(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -8488,7 +8617,6 @@ func TestWorkerVerification_MultiTicketWithVerify(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 1,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -8747,7 +8875,6 @@ func TestWorkerHeartbeat_WrittenOnProcess(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Workspace: "test", Status: "pending"},
 		},
-		CurrentIndex: 0,
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 
@@ -8799,7 +8926,6 @@ func TestSyncFromQueueFile_DetectsWorkerLost(t *testing.T) {
 	// Write queue file with stale heartbeat (60 seconds ago)
 	qf := &QueueFile{
 		Running:       true,
-		CurrentIndex:  0,
 		LastHeartbeat: time.Now().Unix() - 60,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Status: "working"},
@@ -8829,7 +8955,6 @@ func TestSyncFromQueueFile_WorkerNotLost(t *testing.T) {
 	// Write queue file with fresh heartbeat
 	qf := &QueueFile{
 		Running:       true,
-		CurrentIndex:  0,
 		LastHeartbeat: time.Now().Unix(),
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Status: "working"},
@@ -8890,8 +9015,8 @@ func TestHelpText_IncludesNewKeyBindings(t *testing.T) {
 	if !strings.Contains(text, "Select/deselect ticket") {
 		t.Error("help text should mention 'Select/deselect ticket' for Space key")
 	}
-	if !strings.Contains(text, "Paste selected to queue") {
-		t.Error("help text should mention 'Paste selected to queue' for p key")
+	if !strings.Contains(text, "Set preprocessing instruction") {
+		t.Error("help text should mention 'Set preprocessing instruction' for p key")
 	}
 }
 
@@ -8903,7 +9028,6 @@ func TestWriteQueueFile_PreservesHeartbeat(t *testing.T) {
 	qf := &QueueFile{
 		Name:          "Test",
 		Running:       true,
-		CurrentIndex:  0,
 		LastHeartbeat: 1234567890,
 		Tickets:       []QueueTicket{{Path: "/tmp/a.md", Status: "working"}},
 	}
@@ -8952,13 +9076,12 @@ func TestSyncFromQueueFile_CapsCurrentQueueIdx(t *testing.T) {
 	m.queueRunning = true
 	m.currentQueueIdx = 0
 
-	// Worker writes queue file with CurrentIndex=5 (out of bounds for 2-item TUI queue).
+	// Worker writes queue file with statuses out of sync with TUI queue.
 	// The queue file has more tickets than the TUI because user removed some via TUI
 	// but worker read an older copy.
 	qf := &QueueFile{
 		Name:         "Test",
 		Running:      true,
-		CurrentIndex: 5,
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "ws", Status: "pending"},
 			{Path: "/tmp/b.md", Workspace: "ws", Status: "pending"},
@@ -9023,7 +9146,6 @@ func TestWriteQueueFileToPath_PreservesHeartbeat(t *testing.T) {
 	qf := &QueueFile{
 		Name:          "Test",
 		Running:       true,
-		CurrentIndex:  0,
 		LastHeartbeat: 9999999999,
 		Tickets:       []QueueTicket{{Path: "/tmp/a.md", Status: "working"}},
 	}
@@ -9201,7 +9323,6 @@ func TestWorkerVerification_MarksFileAsVerified(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -9260,7 +9381,6 @@ func TestWorkerFastPath_ReReadsQueueFile(t *testing.T) {
 		Name:         "Test Queue",
 		Prompt:       "original prompt",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "completed"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -9301,7 +9421,7 @@ func TestWorkerFastPath_ReReadsQueueFile(t *testing.T) {
 }
 
 // TestWorkerFastPath_WritesHeartbeat verifies that the worker writes a heartbeat
-// when advancing past already-completed/failed tickets in the fast-path.
+// when advancing past already-completed tickets in the fast-path.
 func TestWorkerFastPath_WritesHeartbeat(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
@@ -9323,7 +9443,6 @@ func TestWorkerFastPath_WritesHeartbeat(t *testing.T) {
 	qf := &QueueFile{
 		Name:          "Test Queue",
 		Running:       true,
-		CurrentIndex:  0,
 		LastHeartbeat: 0, // no heartbeat initially
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "completed"},
@@ -9401,8 +9520,8 @@ func TestBuildQueueFileFromModel_ReorderBeforeCurrent(t *testing.T) {
 // items with explicit workerStatus before currentQueueIdx keep their status.
 func TestBuildQueueFileFromModel_WorkerStatusPreservedBeforeCurrent(t *testing.T) {
 	items := []list.Item{
-		tuiTicketItem{title: "Failed", filePath: "/tmp/f.md", workspace: "ws",
-			status: "created", workerStatus: "failed", selected: true},
+		tuiTicketItem{title: "Pending", filePath: "/tmp/p.md", workspace: "ws",
+			status: "created", workerStatus: "pending", selected: true},
 		tuiTicketItem{title: "Completed", filePath: "/tmp/c.md", workspace: "ws",
 			status: "created", workerStatus: "completed", selected: true},
 		tuiTicketItem{title: "Current", filePath: "/tmp/cur.md", workspace: "ws",
@@ -9415,8 +9534,9 @@ func TestBuildQueueFileFromModel_WorkerStatusPreservedBeforeCurrent(t *testing.T
 
 	qf := buildQueueFileFromModel(&m)
 
-	if qf.Tickets[0].Status != "failed" {
-		t.Errorf("failed ticket status=%q, want 'failed'", qf.Tickets[0].Status)
+	// "pending" workerStatus is recalculated (not preserved as a special status)
+	if qf.Tickets[0].Status != "pending" {
+		t.Errorf("pending ticket status=%q, want 'pending'", qf.Tickets[0].Status)
 	}
 	if qf.Tickets[1].Status != "completed" {
 		t.Errorf("completed ticket status=%q, want 'completed'", qf.Tickets[1].Status)
@@ -9448,7 +9568,6 @@ func TestWorkerMarkAsWorking_ReReadsQueueFile(t *testing.T) {
 		Name:         "Original Queue",
 		Prompt:       "original prompt",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -9532,7 +9651,6 @@ func TestWorkerMarkAsWorking_TicketRemovedBeforeProcessing(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 			{Path: ticket2, Workspace: "testws", Status: "pending"},
@@ -9621,7 +9739,6 @@ func TestWorkerVerificationFail_TicketRemovedLogs(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets:      []QueueTicket{{Path: ticket1, Workspace: "testws", Status: "pending"}},
 	}
 	writeQueueFileDataToPath(qf, queuePath)
@@ -9645,7 +9762,6 @@ func TestWorkerVerificationFail_TicketRemovedLogs(t *testing.T) {
 		readQf, err := readQueueFileFromPath(queuePath)
 		if err == nil && len(readQf.Tickets) > 0 {
 			readQf.Tickets = []QueueTicket{}
-			readQf.CurrentIndex = -1
 			readQf.Running = false
 			writeQueueFileDataToPath(readQf, queuePath)
 		}
@@ -9948,6 +10064,155 @@ func TestTuiModel_QueuePickerNewQueue(t *testing.T) {
 	m4 := result.(tuiModel)
 	if m4.mode != tuiModeQueuePicker {
 		t.Errorf("mode=%v, want tuiModeQueuePicker after esc from new queue", m4.mode)
+	}
+}
+
+func TestTuiModel_QueuePickerDeleteConfirmation(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "A", workspace: "ws", status: "created"},
+	}
+	m := newTestTuiModelWithItems(items)
+
+	// Create a temp queue file to delete
+	tmpDir := t.TempDir()
+	origFunc := queueFilePathForID
+	_ = origFunc // reference to avoid unused warning
+	testQueuePath := filepath.Join(tmpDir, "test-queue.json")
+	os.WriteFile(testQueuePath, []byte(`{"name":"test-queue","tickets":[]}`), 0644)
+
+	// Enter queue picker
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Q'}}
+	result, _ := m.Update(msg)
+	m2 := result.(tuiModel)
+	if m2.mode != tuiModeQueuePicker {
+		t.Fatalf("mode=%v, want tuiModeQueuePicker", m2.mode)
+	}
+
+	// Add a non-active queue item to the picker
+	pickerItems := []list.Item{
+		tuiQueueItem{id: "test-queue", name: "Test Queue", active: false},
+	}
+	m2.queuePickerList.SetItems(pickerItems)
+
+	// Press d to delete - should enter confirmation mode, NOT delete immediately
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}
+	result, _ = m2.Update(msg)
+	m3 := result.(tuiModel)
+	if m3.mode != tuiModeConfirmDeleteQueue {
+		t.Errorf("mode=%v, want tuiModeConfirmDeleteQueue", m3.mode)
+	}
+	if m3.pendingDeleteQueueID != "test-queue" {
+		t.Errorf("pendingDeleteQueueID=%q, want %q", m3.pendingDeleteQueueID, "test-queue")
+	}
+
+	// Press n to cancel - should go back to queue picker
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}}
+	result, _ = m3.Update(msg)
+	m4 := result.(tuiModel)
+	if m4.mode != tuiModeQueuePicker {
+		t.Errorf("mode=%v, want tuiModeQueuePicker after cancel", m4.mode)
+	}
+	if m4.pendingDeleteQueueID != "" {
+		t.Errorf("pendingDeleteQueueID should be empty after cancel, got %q", m4.pendingDeleteQueueID)
+	}
+}
+
+func TestTuiModel_QueuePickerDeleteConfirmEsc(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "A", workspace: "ws", status: "created"},
+	}
+	m := newTestTuiModelWithItems(items)
+
+	// Enter queue picker
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Q'}}
+	result, _ := m.Update(msg)
+	m2 := result.(tuiModel)
+
+	// Add a non-active queue item
+	pickerItems := []list.Item{
+		tuiQueueItem{id: "some-queue", name: "Some Queue", active: false},
+	}
+	m2.queuePickerList.SetItems(pickerItems)
+
+	// Press d
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}
+	result, _ = m2.Update(msg)
+	m3 := result.(tuiModel)
+	if m3.mode != tuiModeConfirmDeleteQueue {
+		t.Fatalf("mode=%v, want tuiModeConfirmDeleteQueue", m3.mode)
+	}
+
+	// Press esc to cancel
+	msg = tea.KeyMsg{Type: tea.KeyEsc}
+	result, _ = m3.Update(msg)
+	m4 := result.(tuiModel)
+	if m4.mode != tuiModeQueuePicker {
+		t.Errorf("mode=%v, want tuiModeQueuePicker after esc", m4.mode)
+	}
+	if m4.pendingDeleteQueueID != "" {
+		t.Errorf("pendingDeleteQueueID should be empty after esc, got %q", m4.pendingDeleteQueueID)
+	}
+}
+
+func TestTuiModel_QueuePickerDeleteActiveQueueBlocked(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "A", workspace: "ws", status: "created"},
+	}
+	m := newTestTuiModelWithItems(items)
+
+	// Enter queue picker
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Q'}}
+	result, _ := m.Update(msg)
+	m2 := result.(tuiModel)
+
+	// Add an active queue item
+	pickerItems := []list.Item{
+		tuiQueueItem{id: "default", name: "Default", active: true},
+	}
+	m2.queuePickerList.SetItems(pickerItems)
+
+	// Press d - should NOT enter confirmation mode for active queue
+	msg = tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}}
+	result, _ = m2.Update(msg)
+	m3 := result.(tuiModel)
+	if m3.mode != tuiModeQueuePicker {
+		t.Errorf("mode=%v, want tuiModeQueuePicker (should stay in picker for active queue)", m3.mode)
+	}
+	if m3.pendingDeleteQueueID != "" {
+		t.Errorf("pendingDeleteQueueID should be empty for active queue, got %q", m3.pendingDeleteQueueID)
+	}
+}
+
+func TestTuiModel_QueuePickerDeleteConfirmYes(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "A", workspace: "ws", status: "created"},
+	}
+	m := newTestTuiModelWithItems(items)
+
+	// Create a temp queue file
+	tmpDir := t.TempDir()
+	testQueuePath := filepath.Join(tmpDir, "delete-me.json")
+	os.WriteFile(testQueuePath, []byte(`{"name":"delete-me","tickets":[]}`), 0644)
+
+	// Simulate being in confirm delete mode with the queue ID
+	m.mode = tuiModeConfirmDeleteQueue
+	m.pendingDeleteQueueID = "delete-me"
+
+	// Verify the confirmation dialog appears in View
+	view := m.View()
+	if !strings.Contains(view, "Delete queue") || !strings.Contains(view, "delete-me") || !strings.Contains(view, "(y/n)") {
+		t.Errorf("View should show delete confirmation, got: %s", view)
+	}
+
+	// Press y to confirm
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}
+	result, _ := m.Update(msg)
+	m2 := result.(tuiModel)
+	if m2.mode != tuiModeQueuePicker {
+		t.Errorf("mode=%v, want tuiModeQueuePicker after confirm", m2.mode)
+	}
+	if m2.pendingDeleteQueueID != "" {
+		t.Errorf("pendingDeleteQueueID should be empty after confirm, got %q", m2.pendingDeleteQueueID)
 	}
 }
 
@@ -10622,7 +10887,6 @@ func TestWorkerLoop_ExitCodeNeg1WithCompletedFrontmatter(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 		},
@@ -10650,7 +10914,7 @@ func TestWorkerLoop_ExitCodeNeg1WithCompletedFrontmatter(t *testing.T) {
 
 	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
 
-	// The ticket should be marked as "completed" (not "failed") because
+	// The ticket should be marked as "completed" (not "pending") because
 	// the frontmatter says "completed" even though exit code was -1
 	finalQf, _ := readQueueFileFromPath(queuePath)
 	if len(finalQf.Tickets) == 0 {
@@ -10681,7 +10945,6 @@ func TestWorkerLoop_ExitCodeNeg1WithoutCompletedFrontmatter(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending"},
 		},
@@ -10694,13 +10957,10 @@ func TestWorkerLoop_ExitCodeNeg1WithoutCompletedFrontmatter(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
+		// Cancel after the runner has been called at least once (proving the ticket was processed)
 		for {
 			time.Sleep(200 * time.Millisecond)
-			qf2, err := readQueueFileFromPath(queuePath)
-			if err != nil {
-				continue
-			}
-			if allTicketsProcessed(qf2) {
+			if len(runner.calls) >= 1 {
 				cancel()
 				return
 			}
@@ -10709,13 +10969,13 @@ func TestWorkerLoop_ExitCodeNeg1WithoutCompletedFrontmatter(t *testing.T) {
 
 	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
 
-	// The ticket should be "failed" because frontmatter still says "created"
+	// The ticket should be "pending" because frontmatter still says "created" (retry)
 	finalQf, _ := readQueueFileFromPath(queuePath)
 	if len(finalQf.Tickets) == 0 {
 		t.Fatal("expected at least 1 ticket in queue")
 	}
-	if finalQf.Tickets[0].Status != "failed" {
-		t.Errorf("Tickets[0].Status = %q, want 'failed' (exit code -1 and frontmatter not completed)", finalQf.Tickets[0].Status)
+	if finalQf.Tickets[0].Status != "pending" {
+		t.Errorf("Tickets[0].Status = %q, want 'pending' (exit code -1 and frontmatter not completed)", finalQf.Tickets[0].Status)
 	}
 }
 
@@ -10742,7 +11002,6 @@ func TestWorkerReconcile_CompletedVerified(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "working"},
 		},
@@ -10802,7 +11061,6 @@ func TestWorkerReconcile_CompletedNotVerified(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "working"},
 		},
@@ -10870,7 +11128,6 @@ func TestWorkerReconcile_NotCompleted(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "working"},
 		},
@@ -10901,7 +11158,7 @@ func TestWorkerReconcile_NotCompleted(t *testing.T) {
 }
 
 // TestWorkerReconcile_CompletedVerifyFails verifies that when reconciliation
-// runs verification and it fails, the ticket is marked as failed.
+// runs verification and it fails, the ticket is marked as pending for retry.
 func TestWorkerReconcile_CompletedVerifyFails(t *testing.T) {
 	tmpDir := t.TempDir()
 	queuePath := filepath.Join(tmpDir, "queue.json")
@@ -10922,7 +11179,6 @@ func TestWorkerReconcile_CompletedVerifyFails(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "working"},
 		},
@@ -10935,9 +11191,9 @@ func TestWorkerReconcile_CompletedVerifyFails(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
+		// Cancel after at least 1 verify call (ticket stays pending, retried by worker)
 		for {
-			qfResult, err := readQueueFileFromPath(queuePath)
-			if err == nil && allTicketsProcessed(qfResult) {
+			if runner.verifyCalls >= 1 {
 				cancel()
 				return
 			}
@@ -10947,18 +11203,18 @@ func TestWorkerReconcile_CompletedVerifyFails(t *testing.T) {
 
 	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
 
-	// Only verification should have been called
+	// Only verification should have been called (no work calls — reconciliation skips work)
 	if runner.workCalls != 0 {
 		t.Errorf("expected 0 work calls, got %d", runner.workCalls)
 	}
-	if runner.verifyCalls != 1 {
-		t.Errorf("expected 1 verify call, got %d", runner.verifyCalls)
+	if runner.verifyCalls < 1 {
+		t.Errorf("expected >= 1 verify call, got %d", runner.verifyCalls)
 	}
 
-	// Ticket should be marked as failed
+	// Ticket should be marked as pending (for retry)
 	finalQf, _ := readQueueFileFromPath(queuePath)
-	if finalQf.Tickets[0].Status != "failed" {
-		t.Errorf("Tickets[0].Status = %q, want 'failed'", finalQf.Tickets[0].Status)
+	if finalQf.Tickets[0].Status != "pending" {
+		t.Errorf("Tickets[0].Status = %q, want 'pending'", finalQf.Tickets[0].Status)
 	}
 }
 
@@ -10985,7 +11241,6 @@ func TestWorkerLoop_AdditionalRequestSetsStatusAtRuntime(t *testing.T) {
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending", RequestNum: 1},
 		},
@@ -11049,9 +11304,9 @@ func TestWorkerLoop_AdditionalRequestSetsStatusAtRuntime(t *testing.T) {
 
 // statusCheckingMockRunner is a mock runner that reads the ticket file status during Run
 type statusCheckingMockRunner struct {
-	calls          []string
-	exitCode       int
-	ticketPath     string
+	calls           []string
+	exitCode        int
+	ticketPath      string
 	statusDuringRun string
 }
 
@@ -11096,7 +11351,6 @@ func TestWorkerLoop_AdditionalRequestRestoresOriginalStatusFromDB(t *testing.T) 
 	qf := &QueueFile{
 		Name:         "Test Queue",
 		Running:      true,
-		CurrentIndex: 0,
 		Tickets: []QueueTicket{
 			{Path: ticket1, Workspace: "testws", Status: "pending", RequestNum: 1},
 		},
@@ -11699,7 +11953,6 @@ func TestQueueTicketStartedAt_RoundTrip(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "test", Status: "working", StartedAt: now},
 		},
-		CurrentIndex: 0,
 	}
 
 	data, err := json.Marshal(qf)
@@ -11735,7 +11988,6 @@ func TestSyncFromQueueFile_PicksUpStartedAt(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "test", Status: "working", StartedAt: now},
 		},
-		CurrentIndex: 0,
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 
@@ -11769,7 +12021,6 @@ func TestSyncFromQueueFile_ClearsStartedAtWhenNotWorking(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: "/tmp/a.md", Workspace: "test", Status: "completed"},
 		},
-		CurrentIndex: -1,
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 
@@ -11838,7 +12089,6 @@ func TestWorkerSetsStartedAt(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Workspace: "test", Status: "pending"},
 		},
-		CurrentIndex: 0,
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 
@@ -11918,7 +12168,6 @@ func TestRestoreQueueState_RestoresStartedAt(t *testing.T) {
 		Tickets: []QueueTicket{
 			{Path: ticketPath, Workspace: "testws", Status: "working", StartedAt: now},
 		},
-		CurrentIndex: 0,
 	}
 	writeQueueFileDataToPath(qf, queuePath)
 	defer os.Remove(queuePath)
@@ -11942,9 +12191,52 @@ func TestRestoreQueueState_RestoresStartedAt(t *testing.T) {
 	}
 }
 
+// ---- Copy path tests ----
+
+func TestCopyPath_CKeyCopiesAbsolutePath(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "Test", status: "created", filePath: "/tmp/test_ticket.md"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.list.Select(0)
+
+	// Press c to copy path — should stay in list mode (no mode change)
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	updated := newModel.(tuiModel)
+
+	if updated.mode != tuiModeList {
+		t.Errorf("mode = %d, want tuiModeList (%d) after 'c' press", updated.mode, tuiModeList)
+	}
+
+	// Verify clipboard contains the path (may fail in headless CI, skip gracefully)
+	got, err := clipboard.ReadAll()
+	if err != nil {
+		t.Skipf("clipboard not available in test environment: %v", err)
+	}
+	if got != "/tmp/test_ticket.md" {
+		t.Errorf("clipboard = %q, want %q", got, "/tmp/test_ticket.md")
+	}
+}
+
+func TestCopyPath_CKeyNoOpWithoutItem(t *testing.T) {
+	items := []list.Item{
+		tuiTicketItem{title: "Test", status: "created", filePath: ""},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.list.Select(0)
+
+	// Press c on item with no filePath — should be a no-op
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	updated := newModel.(tuiModel)
+
+	if updated.mode != tuiModeList {
+		t.Errorf("mode = %d, want tuiModeList (%d)", updated.mode, tuiModeList)
+	}
+}
+
 // ---- Comment tests ----
 
-func TestComment_CKeyEntersCommentMode(t *testing.T) {
+func TestComment_ShiftCKeyEntersCommentMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "ticket.md")
 	os.WriteFile(path, []byte("---\nStatus: created\n---\n# Test\n"), 0644)
@@ -11956,7 +12248,7 @@ func TestComment_CKeyEntersCommentMode(t *testing.T) {
 	m.textInput = newTestTextInput()
 	m.list.Select(0)
 
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 
 	if updated.mode != tuiModeComment {
@@ -11981,7 +12273,7 @@ func TestComment_SaveAndDisplay(t *testing.T) {
 	m.list.Select(0)
 
 	// Enter comment mode
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 
 	// Type a comment
@@ -12023,7 +12315,7 @@ func TestComment_EscCancels(t *testing.T) {
 	m.list.Select(0)
 
 	// Enter comment mode
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 
 	// Type something
@@ -12057,7 +12349,7 @@ func TestComment_PreFillsExistingComment(t *testing.T) {
 	m.list.Select(0)
 
 	// Enter comment mode — should pre-fill
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 
 	if updated.textInput.Value() != "existing note" {
@@ -12083,7 +12375,7 @@ func TestComment_CrossSyncsToQueue(t *testing.T) {
 	})
 
 	// Enter comment mode from All tab, save
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 	updated.textInput.SetValue("synced comment")
 	newModel, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -12109,7 +12401,7 @@ func TestComment_EmptyCommentClearsField(t *testing.T) {
 	m.list.Select(0)
 
 	// Enter comment mode
-	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 	updated := newModel.(tuiModel)
 
 	// Clear the comment
@@ -12620,10 +12912,9 @@ func TestLoadPinnedQueues_SortsByPinOrder(t *testing.T) {
 
 // --- Additional request / draft queue insertion tests ---
 
-func TestAdditionalRequest_InsertAtCurrentQueueIdx_WhenRunning(t *testing.T) {
+func TestAdditionalRequest_InsertAtZero_WhenRunning(t *testing.T) {
 	// Setup: queue is running with 3 items, currentQueueIdx = 2 (bottom item)
-	// When we insert a new item, it should go at currentQueueIdx (position 2)
-	// so it's processed NEXT by the bottom-to-top worker.
+	// New item always inserts at position 0 (visual top), regardless of running state.
 	items := []list.Item{
 		tuiTicketItem{title: "A", status: "created", filePath: "/tmp/a.md"},
 		tuiTicketItem{title: "B", status: "created", filePath: "/tmp/b.md"},
@@ -12637,11 +12928,7 @@ func TestAdditionalRequest_InsertAtCurrentQueueIdx_WhenRunning(t *testing.T) {
 
 	// Simulate the insertion logic from updateAdditionalContext
 	newItem := tuiTicketItem{title: "NewReq", status: "created", filePath: "/tmp/a.md", requestNum: 1}
-	insertPos := 0
-	if m.queueRunning && m.currentQueueIdx >= 0 {
-		insertPos = m.currentQueueIdx
-	}
-	m.queue.InsertItem(insertPos, newItem)
+	m.queue.InsertItem(0, newItem)
 	if m.queueRunning && m.currentQueueIdx >= 0 {
 		m.currentQueueIdx++
 	}
@@ -12650,9 +12937,9 @@ func TestAdditionalRequest_InsertAtCurrentQueueIdx_WhenRunning(t *testing.T) {
 	if len(qItems) != 4 {
 		t.Fatalf("expected 4 items, got %d", len(qItems))
 	}
-	// Verify: [A, B, NewReq, C]
-	if qItems[2].(tuiTicketItem).title != "NewReq" {
-		t.Errorf("index 2 should be NewReq, got %q", qItems[2].(tuiTicketItem).title)
+	// Verify: [NewReq, A, B, C]
+	if qItems[0].(tuiTicketItem).title != "NewReq" {
+		t.Errorf("index 0 should be NewReq, got %q", qItems[0].(tuiTicketItem).title)
 	}
 	if qItems[3].(tuiTicketItem).title != "C" {
 		t.Errorf("index 3 should be C (current), got %q", qItems[3].(tuiTicketItem).title)
@@ -12661,7 +12948,6 @@ func TestAdditionalRequest_InsertAtCurrentQueueIdx_WhenRunning(t *testing.T) {
 	if m.currentQueueIdx != 3 {
 		t.Errorf("currentQueueIdx = %d, want 3", m.currentQueueIdx)
 	}
-	// After worker finishes C (3), it decrements to 2 → NewReq. Correct!
 }
 
 func TestAdditionalRequest_InsertAtZero_WhenNotRunning(t *testing.T) {
@@ -12677,11 +12963,7 @@ func TestAdditionalRequest_InsertAtZero_WhenNotRunning(t *testing.T) {
 	m.currentQueueIdx = -1
 
 	newItem := tuiTicketItem{title: "NewReq", status: "created", filePath: "/tmp/a.md", requestNum: 1}
-	insertPos := 0
-	if m.queueRunning && m.currentQueueIdx >= 0 {
-		insertPos = m.currentQueueIdx
-	}
-	m.queue.InsertItem(insertPos, newItem)
+	m.queue.InsertItem(0, newItem)
 
 	qItems := m.queue.Items()
 	if len(qItems) != 3 {
@@ -12693,9 +12975,9 @@ func TestAdditionalRequest_InsertAtZero_WhenNotRunning(t *testing.T) {
 	}
 }
 
-func TestDraftActivation_MovesToCurrentQueueIdx_WhenRunning(t *testing.T) {
+func TestDraftActivation_MovesToZero_WhenRunning(t *testing.T) {
 	// Setup: queue running, draft at position 0, current at position 2
-	// On activation, draft should move from 0 to just before current (processed next)
+	// On activation, draft should move to position 0 (visual top)
 	items := []list.Item{
 		tuiTicketItem{title: "Draft1", status: "created", filePath: "/tmp/d.md", requestNum: 1, isDraft: true},
 		tuiTicketItem{title: "A", status: "created", filePath: "/tmp/a.md"},
@@ -12730,13 +13012,12 @@ func TestDraftActivation_MovesToCurrentQueueIdx_WhenRunning(t *testing.T) {
 		t.Fatalf("expected 3 items, got %d", len(qItems))
 	}
 
-	// The activated draft should now be at position 1 (just before B at 2)
-	// After removal from 0: [A(0), B(1)], currentQueueIdx adjusted to 1
-	// After insert at currentQueueIdx(1): [A(0), Draft1(1), B(2)], currentQueueIdx becomes 2
-	if qItems[1].(tuiTicketItem).title != "Draft1" {
-		t.Errorf("index 1 should be Draft1 (activated), got %q", qItems[1].(tuiTicketItem).title)
+	// Draft was at position 0. Remove from 0: [A(0), B(1)], currentQueueIdx adjusted to 1.
+	// Insert at 0: [Draft1(0), A(1), B(2)], currentQueueIdx becomes 2.
+	if qItems[0].(tuiTicketItem).title != "Draft1" {
+		t.Errorf("index 0 should be Draft1 (activated), got %q", qItems[0].(tuiTicketItem).title)
 	}
-	if qItems[1].(tuiTicketItem).isDraft {
+	if qItems[0].(tuiTicketItem).isDraft {
 		t.Error("activated item should not be a draft")
 	}
 	if qItems[2].(tuiTicketItem).title != "B" {
@@ -12817,17 +13098,17 @@ func TestCountRemainingTickets(t *testing.T) {
 			tickets: []QueueTicket{
 				{Status: "completed"},
 				{Status: "pending"},
-				{Status: "failed"},
+				{Status: "pending"},
 				{Status: "working"},
 				{Status: ""},
 			},
-			expected: 3, // pending + working + empty
+			expected: 4, // pending + pending + working + empty
 		},
 		{
-			name: "all completed/failed",
+			name: "all completed",
 			tickets: []QueueTicket{
 				{Status: "completed"},
-				{Status: "failed"},
+				{Status: "completed"},
 				{Status: "completed"},
 			},
 			expected: 0,
@@ -12857,7 +13138,7 @@ func TestQueueRemainingCount(t *testing.T) {
 	items := []list.Item{
 		tuiTicketItem{title: "A", workerStatus: "completed"},
 		tuiTicketItem{title: "B", workerStatus: "pending"},
-		tuiTicketItem{title: "C", workerStatus: "failed"},
+		tuiTicketItem{title: "C", workerStatus: "pending"},
 		tuiTicketItem{title: "D", workerStatus: "working"},
 		tuiTicketItem{title: "E", workerStatus: ""},
 	}
@@ -12867,9 +13148,9 @@ func TestQueueRemainingCount(t *testing.T) {
 		m.queue.InsertItem(len(m.queue.Items()), item)
 	}
 	got := m.queueRemainingCount()
-	// pending + working + empty = 3
-	if got != 3 {
-		t.Errorf("queueRemainingCount() = %d, want 3", got)
+	// pending + pending + working + empty = 4
+	if got != 4 {
+		t.Errorf("queueRemainingCount() = %d, want 4", got)
 	}
 }
 
@@ -12909,5 +13190,808 @@ func TestTabBarShowsRemainingCount(t *testing.T) {
 	}
 	if strings.Contains(bar, "(3)") {
 		t.Errorf("tabBar should NOT show total count (3), got: %s", bar)
+	}
+}
+
+// --- Unread tracking tests ---
+
+func TestTuiTicketItem_Title_UnreadMarker(t *testing.T) {
+	// Unread completed ticket shows * after icon
+	item := tuiTicketItem{title: "My Ticket", status: "completed", unread: true}
+	got := item.Title()
+	if !strings.Contains(got, "◆*") {
+		t.Errorf("unread completed: Title()=%q, want to contain '◆*'", got)
+	}
+	if !strings.Contains(got, "My Ticket") {
+		t.Errorf("unread completed: Title()=%q, want to contain title", got)
+	}
+
+	// Read completed ticket has no *
+	item2 := tuiTicketItem{title: "My Ticket", status: "completed", unread: false}
+	got2 := item2.Title()
+	if strings.Contains(got2, "*") {
+		t.Errorf("read completed: Title()=%q, should not contain '*'", got2)
+	}
+
+	// Unread verified ticket shows * after icon
+	item3 := tuiTicketItem{title: "My Ticket", status: "completed + verified", unread: true}
+	got3 := item3.Title()
+	if !strings.Contains(got3, "◆*") {
+		t.Errorf("unread verified: Title()=%q, want to contain '◆*'", got3)
+	}
+	if !strings.HasSuffix(got3, ":v") {
+		t.Errorf("unread verified: Title()=%q, want to end with ':v'", got3)
+	}
+
+	// Non-completed ticket with unread=true still shows *
+	item4 := tuiTicketItem{title: "My Ticket", status: "created", unread: true}
+	got4 := item4.Title()
+	if !strings.Contains(got4, "○*") {
+		t.Errorf("unread created: Title()=%q, want to contain '○*'", got4)
+	}
+}
+
+func TestQueueStatusBadges_UnreadCount(t *testing.T) {
+	m := newTestTuiModelWithItems(nil)
+	m.queue.SetItems([]list.Item{
+		tuiTicketItem{title: "T1", workerStatus: "completed", unread: true},
+		tuiTicketItem{title: "T2", workerStatus: "completed", unread: true},
+		tuiTicketItem{title: "T3", workerStatus: "pending", unread: true},
+		tuiTicketItem{title: "T4", workerStatus: "pending", unread: false},
+	})
+	got := m.queueStatusBadges()
+	if !strings.Contains(got, "3u") {
+		t.Errorf("badges=%q, want to contain '3u' for 3 unread", got)
+	}
+	if !strings.Contains(got, "◆2") {
+		t.Errorf("badges=%q, want to contain '◆2'", got)
+	}
+}
+
+func TestQueueStatusBadges_NoUnreadCount(t *testing.T) {
+	m := newTestTuiModelWithItems(nil)
+	m.queue.SetItems([]list.Item{
+		tuiTicketItem{title: "T1", workerStatus: "completed", unread: false},
+		tuiTicketItem{title: "T2", workerStatus: "pending", unread: false},
+	})
+	got := m.queueStatusBadges()
+	if strings.Contains(got, "u") {
+		t.Errorf("badges=%q, should not contain unread count when 0 unread", got)
+	}
+}
+
+func TestSyncFromQueueFile_MarksCompletedAsUnread(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	// Create a ticket file on disk for the frontmatter re-read
+	ticketPath := filepath.Join(tmpDir, "ticket.md")
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed\n---\n# Test\n"), 0644)
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "created", filePath: ticketPath, selected: true, workerStatus: "working"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+	m.currentQueueIdx = 0
+
+	// Write queue file where ticket transitions from working to completed
+	qf := &QueueFile{
+		Name:         "Test",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "completed"},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	m.syncFromQueueFileAtPath(queuePath)
+
+	// Verify the item is marked unread
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Error("item A should be marked unread after worker completion")
+		}
+	}
+}
+
+func TestSyncFromQueueFile_PendingNotMarkedAsUnread(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	ticketPath := filepath.Join(tmpDir, "ticket.md")
+	os.WriteFile(ticketPath, []byte("---\nStatus: not completed\n---\n# Test\n"), 0644)
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "created", filePath: ticketPath, selected: true, workerStatus: "working"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+	m.currentQueueIdx = 0
+
+	qf := &QueueFile{
+		Name:         "Test",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "pending"},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	m.syncFromQueueFileAtPath(queuePath)
+
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && item.unread {
+			t.Error("item A should NOT be marked unread after worker sets pending (only completed triggers unread)")
+		}
+	}
+}
+
+func TestUnread_PersistedInQueueFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", filePath: "/tmp/a.md", selected: true, workerStatus: "completed", unread: true},
+		tuiTicketItem{title: "B", filePath: "/tmp/b.md", selected: true, workerStatus: "pending", unread: false},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+
+	qf := buildQueueFileFromModel(&m)
+
+	// Verify unread is set in the queue file struct
+	if !qf.Tickets[0].Unread {
+		t.Error("ticket A should have Unread=true in queue file")
+	}
+	if qf.Tickets[1].Unread {
+		t.Error("ticket B should have Unread=false in queue file")
+	}
+
+	// Write and read back to verify JSON round-trip
+	writeQueueFileDataToPath(&qf, queuePath)
+	qf2, err := readQueueFileFromPath(queuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !qf2.Tickets[0].Unread {
+		t.Error("ticket A Unread should survive JSON round-trip")
+	}
+	if qf2.Tickets[1].Unread {
+		t.Error("ticket B Unread should remain false after round-trip")
+	}
+}
+
+func TestUnread_RestoredOnStartup(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queues", "default.json")
+	os.MkdirAll(filepath.Dir(queuePath), 0755)
+
+	// Create a ticket file
+	wsDir := filepath.Join(tmpDir, "workspaces", "testws", "tickets")
+	os.MkdirAll(wsDir, 0755)
+	indexDir := filepath.Join(tmpDir, "workspaces", "testws")
+	os.WriteFile(filepath.Join(indexDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
+	ticketPath := filepath.Join(wsDir, "1000_test.md")
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed\n---\n# Test\n"), 0644)
+
+	// Write queue file with unread ticket
+	qf := &QueueFile{
+		Name: "Test",
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "testws", Status: "completed", Unread: true},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	// Create model and restore — need items loaded first
+	items := []list.Item{
+		tuiTicketItem{title: "test", status: "completed", filePath: ticketPath, workspace: "testws"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.baseDir = tmpDir
+
+	// Override queueFilePathForID for test (restore uses it)
+	// Instead, directly test restoreQueueState via syncFromQueueFileAtPath pattern
+	m.syncFromQueueFileAtPath(queuePath)
+
+	// After sync, unread should be picked up from the file
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.filePath == ticketPath && !item.unread {
+			t.Error("unread should be restored from queue file")
+		}
+	}
+}
+
+func TestSyncFromQueueFile_PreservesUnreadOnNoStatusChange(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "completed", filePath: "/tmp/a.md", selected: true, workerStatus: "completed", unread: true},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+
+	// File has same status (completed) — no transition, unread should be preserved
+	qf := &QueueFile{
+		Name:    "Test",
+		Running: true,
+		Tickets: []QueueTicket{
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed", Unread: true},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	m.syncFromQueueFileAtPath(queuePath)
+
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Error("item A unread should be preserved when status unchanged")
+		}
+	}
+}
+
+// --- Mark all read tests ---
+
+func TestMarkAllReadInQueueFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "queue.json")
+
+	// Write queue with some unread tickets
+	qf := &QueueFile{
+		Name: "Test Queue",
+		Tickets: []QueueTicket{
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed", Unread: true},
+			{Path: "/tmp/b.md", Workspace: "ws", Status: "completed", Unread: false},
+			{Path: "/tmp/c.md", Workspace: "ws", Status: "working", Unread: true},
+		},
+	}
+	writeQueueFileDataToPath(qf, path)
+
+	count, err := markAllReadInQueueFileAtPath(path)
+	if err != nil {
+		t.Fatalf("markAllReadInQueueFileAtPath: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
+	}
+
+	// Verify all tickets are now read
+	qf2, err := readQueueFileFromPath(path)
+	if err != nil {
+		t.Fatalf("readQueueFileFromPath: %v", err)
+	}
+	for i, ticket := range qf2.Tickets {
+		if ticket.Unread {
+			t.Errorf("ticket[%d] still unread after mark-read", i)
+		}
+	}
+}
+
+func TestMarkAllReadInQueueFile_NoUnread(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "queue.json")
+
+	qf := &QueueFile{
+		Name: "Test Queue",
+		Tickets: []QueueTicket{
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed", Unread: false},
+			{Path: "/tmp/b.md", Workspace: "ws", Status: "pending", Unread: false},
+		},
+	}
+	writeQueueFileDataToPath(qf, path)
+
+	count, err := markAllReadInQueueFileAtPath(path)
+	if err != nil {
+		t.Fatalf("markAllReadInQueueFileAtPath: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+func TestMarkAllReadInQueueFile_PreservesOtherState(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "queue.json")
+
+	qf := &QueueFile{
+		Name:         "My Queue",
+		Prompt:       "test prompt",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: "/tmp/a.md", Workspace: "ws", Status: "completed", Unread: true},
+			{Path: "/tmp/b.md", Workspace: "ws", Status: "working", Unread: true},
+		},
+		Shortcuts: []string{"shortcut1"},
+	}
+	writeQueueFileDataToPath(qf, path)
+
+	_, err := markAllReadInQueueFileAtPath(path)
+	if err != nil {
+		t.Fatalf("markAllReadInQueueFileAtPath: %v", err)
+	}
+
+	qf2, err := readQueueFileFromPath(path)
+	if err != nil {
+		t.Fatalf("readQueueFileFromPath: %v", err)
+	}
+	if qf2.Name != "My Queue" {
+		t.Errorf("Name = %q, want 'My Queue'", qf2.Name)
+	}
+	if qf2.Prompt != "test prompt" {
+		t.Errorf("Prompt = %q, want 'test prompt'", qf2.Prompt)
+	}
+	if !qf2.Running {
+		t.Error("Running should be preserved as true")
+	}
+	if len(qf2.Shortcuts) != 1 || qf2.Shortcuts[0] != "shortcut1" {
+		t.Errorf("Shortcuts = %v, want [shortcut1]", qf2.Shortcuts)
+	}
+}
+
+func TestMarkAllReadInQueueFile_MissingFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "nonexistent.json")
+
+	_, err := markAllReadInQueueFileAtPath(path)
+	if err == nil {
+		t.Error("expected error for missing file, got nil")
+	}
+}
+
+// --- Worker Picker TUI tests ---
+
+func TestLoadWorkerPickerItems_SortedByTicketCount(t *testing.T) {
+	// Set up temp queues directory with different ticket counts
+	tmpDir := t.TempDir()
+	queuesPath := filepath.Join(tmpDir, ".wiggums", "queues")
+	os.MkdirAll(queuesPath, 0755)
+
+	// Override HOME so listQueueIDs / queueFilePathForID use our temp dir
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	// Create queue files with different ticket counts
+	writeQueueFileDataToPath(&QueueFile{
+		Name: "Few Items",
+		Tickets: []QueueTicket{
+			{Path: "/a.md", Status: "pending"},
+		},
+	}, filepath.Join(queuesPath, "few.json"))
+
+	writeQueueFileDataToPath(&QueueFile{
+		Name: "Many Items",
+		Tickets: []QueueTicket{
+			{Path: "/b.md", Status: "pending"},
+			{Path: "/c.md", Status: "pending"},
+			{Path: "/d.md", Status: "pending"},
+		},
+	}, filepath.Join(queuesPath, "many.json"))
+
+	writeQueueFileDataToPath(&QueueFile{
+		Name: "Some Items",
+		Tickets: []QueueTicket{
+			{Path: "/e.md", Status: "pending"},
+			{Path: "/f.md", Status: "pending"},
+		},
+	}, filepath.Join(queuesPath, "some.json"))
+
+	items := loadWorkerPickerItems()
+	if len(items) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(items))
+	}
+
+	// Should be sorted by ticketCount descending
+	counts := make([]int, len(items))
+	for i, item := range items {
+		counts[i] = item.(tuiQueueItem).ticketCount
+	}
+	if counts[0] != 3 || counts[1] != 2 || counts[2] != 1 {
+		t.Errorf("expected counts [3,2,1], got %v", counts)
+	}
+}
+
+func TestWorkerPickerModel_Init(t *testing.T) {
+	m := workerPickerModel{
+		list: list.New([]list.Item{}, list.NewDefaultDelegate(), 80, 24),
+	}
+	cmd := m.Init()
+	if cmd != nil {
+		t.Error("Init() should return nil")
+	}
+}
+
+func TestWorkerPickerModel_Update_EnterSelectsQueue(t *testing.T) {
+	items := []list.Item{
+		tuiQueueItem{id: "test-queue", name: "Test Queue", ticketCount: 5},
+		tuiQueueItem{id: "other-queue", name: "Other Queue", ticketCount: 2},
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 80, 24)
+	l.Select(0)
+	m := workerPickerModel{list: l}
+
+	// Press Enter
+	msg := tea.KeyMsg{Type: tea.KeyEnter}
+	result, _ := m.Update(msg)
+	final := result.(workerPickerModel)
+
+	if final.selectedID != "test-queue" {
+		t.Errorf("expected selectedID 'test-queue', got %q", final.selectedID)
+	}
+	if !final.quitting {
+		t.Error("expected quitting to be true after Enter")
+	}
+}
+
+func TestWorkerPickerModel_Update_QQuits(t *testing.T) {
+	items := []list.Item{
+		tuiQueueItem{id: "test-queue", name: "Test Queue", ticketCount: 5},
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 80, 24)
+	m := workerPickerModel{list: l}
+
+	msg := tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}}
+	result, _ := m.Update(msg)
+	final := result.(workerPickerModel)
+
+	if final.selectedID != "" {
+		t.Errorf("expected empty selectedID on q, got %q", final.selectedID)
+	}
+	if !final.quitting {
+		t.Error("expected quitting to be true after q")
+	}
+}
+
+func TestWorkerPickerModel_Update_EscQuits(t *testing.T) {
+	items := []list.Item{
+		tuiQueueItem{id: "test-queue", name: "Test Queue", ticketCount: 5},
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 80, 24)
+	m := workerPickerModel{list: l}
+
+	msg := tea.KeyMsg{Type: tea.KeyEscape}
+	result, _ := m.Update(msg)
+	final := result.(workerPickerModel)
+
+	if final.selectedID != "" {
+		t.Errorf("expected empty selectedID on Esc, got %q", final.selectedID)
+	}
+	if !final.quitting {
+		t.Error("expected quitting to be true after Esc")
+	}
+}
+
+func TestWorkerPickerModel_View_ShowsList(t *testing.T) {
+	items := []list.Item{
+		tuiQueueItem{id: "my-queue", name: "My Queue", ticketCount: 3},
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 80, 24)
+	l.Title = "Select a queue to watch"
+	m := workerPickerModel{list: l}
+
+	view := m.View()
+	if view == "" {
+		t.Error("View() should not be empty when not quitting")
+	}
+	if !strings.Contains(view, "Select a queue") {
+		t.Error("View() should contain the title")
+	}
+}
+
+func TestWorkerPickerModel_View_EmptyWhenQuitting(t *testing.T) {
+	m := workerPickerModel{
+		list:     list.New([]list.Item{}, list.NewDefaultDelegate(), 80, 24),
+		quitting: true,
+	}
+	view := m.View()
+	if view != "" {
+		t.Errorf("View() should be empty when quitting, got %q", view)
+	}
+}
+
+func TestWorkerPickerModel_Update_WindowSize(t *testing.T) {
+	items := []list.Item{
+		tuiQueueItem{id: "q1", name: "Queue 1", ticketCount: 1},
+	}
+	l := list.New(items, list.NewDefaultDelegate(), 80, 24)
+	m := workerPickerModel{list: l}
+
+	msg := tea.WindowSizeMsg{Width: 120, Height: 40}
+	result, _ := m.Update(msg)
+	final := result.(workerPickerModel)
+
+	if final.quitting {
+		t.Error("WindowSizeMsg should not cause quitting")
+	}
+}
+
+func TestLoadWorkerPickerItems_ExcludesCompletedFromCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuesPath := filepath.Join(tmpDir, ".wiggums", "queues")
+	os.MkdirAll(queuesPath, 0755)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	writeQueueFileDataToPath(&QueueFile{
+		Name: "Mixed",
+		Tickets: []QueueTicket{
+			{Path: "/a.md", Status: "pending"},
+			{Path: "/b.md", Status: "completed"},
+			{Path: "/c.md", Status: "pending"},
+		},
+	}, filepath.Join(queuesPath, "mixed.json"))
+
+	items := loadWorkerPickerItems()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].(tuiQueueItem).ticketCount != 2 {
+		t.Errorf("expected 2 remaining, got %d", items[0].(tuiQueueItem).ticketCount)
+	}
+}
+
+func TestLoadWorkerPickerItems_DraftsExcludedFromCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuesPath := filepath.Join(tmpDir, ".wiggums", "queues")
+	os.MkdirAll(queuesPath, 0755)
+
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	writeQueueFileDataToPath(&QueueFile{
+		Name: "WithDrafts",
+		Tickets: []QueueTicket{
+			{Path: "/a.md", Status: "pending"},
+			{Path: "/b.md", Status: "pending", IsDraft: true},
+		},
+	}, filepath.Join(queuesPath, "drafts.json"))
+
+	items := loadWorkerPickerItems()
+	if len(items) != 1 {
+		t.Fatalf("expected 1 item, got %d", len(items))
+	}
+	if items[0].(tuiQueueItem).ticketCount != 1 {
+		t.Errorf("expected 1 remaining (drafts excluded), got %d", items[0].(tuiQueueItem).ticketCount)
+	}
+}
+
+// --- Unread persistence bug fix tests ---
+
+// TestWorkerLoop_SetsUnreadOnCompletion verifies the worker sets Unread=true in the
+// queue file when a ticket completes (the primary fix for the unread flicker bug).
+func TestWorkerLoop_SetsUnreadOnCompletion(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "workspaces", "testws")
+	ticketsDir := filepath.Join(wsDir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	os.MkdirAll(filepath.Join(baseDir, "prompts"), 0755)
+	os.WriteFile(filepath.Join(wsDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
+
+	ticket1 := filepath.Join(ticketsDir, "0001_Test.md")
+	os.WriteFile(ticket1, []byte("---\nStatus: created\nSkipVerification: true\nCurIteration: 0\n---\n# Test\n"), 0644)
+
+	qf := &QueueFile{
+		Name:         "Test Queue",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticket1, Workspace: "testws", Status: "pending"},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	// Mock runner that marks ticket as completed in frontmatter
+	runner := &frontmatterUpdatingMockRunner{ticketPath: ticket1}
+	loader := &mockPromptLoader{result: "test prompt"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			time.Sleep(100 * time.Millisecond)
+			qfResult, err := readQueueFileFromPath(queuePath)
+			if err == nil && allTicketsProcessed(qfResult) {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
+
+	finalQf, err := readQueueFileFromPath(queuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finalQf.Tickets[0].Status != "completed" {
+		t.Errorf("Tickets[0].Status = %q, want 'completed'", finalQf.Tickets[0].Status)
+	}
+	if !finalQf.Tickets[0].Unread {
+		t.Error("Tickets[0].Unread should be true after worker completion")
+	}
+}
+
+// TestWorkerReconcile_CompletedVerified_SetsUnread verifies the reconciliation
+// fast-path also sets Unread=true when marking tickets as completed.
+func TestWorkerReconcile_CompletedVerified_SetsUnread(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	baseDir := t.TempDir()
+	wsDir := filepath.Join(baseDir, "workspaces", "testws")
+	ticketsDir := filepath.Join(wsDir, "tickets")
+	os.MkdirAll(ticketsDir, 0755)
+	os.MkdirAll(filepath.Join(baseDir, "prompts"), 0755)
+	os.WriteFile(filepath.Join(wsDir, "index.md"), []byte("---\nDirectory: /tmp\n---\n"), 0644)
+	os.WriteFile(filepath.Join(baseDir, "prompts", "prompt.md"), []byte("Work on: {{WIGGUMS_DIR}}"), 0644)
+
+	// Ticket frontmatter says "completed + verified" (from a previous run that died)
+	ticket1 := filepath.Join(ticketsDir, "0001_Already_Done.md")
+	os.WriteFile(ticket1, []byte("---\nStatus: completed + verified\nCurIteration: 1\n---\n# Already done\n"), 0644)
+
+	// Queue file still shows "working" (stale from dead worker)
+	qf := &QueueFile{
+		Name:         "Test Queue",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticket1, Workspace: "testws", Status: "working"},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	runner := &workerMockRunner{exitCode: 0}
+	loader := &FilePromptLoader{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		for {
+			qfResult, err := readQueueFileFromPath(queuePath)
+			if err == nil && allTicketsProcessed(qfResult) {
+				cancel()
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	workerLoopWithPath(ctx, baseDir, runner, loader, nil, queuePath)
+
+	finalQf, _ := readQueueFileFromPath(queuePath)
+	if finalQf.Tickets[0].Status != "completed" {
+		t.Errorf("Tickets[0].Status = %q, want 'completed'", finalQf.Tickets[0].Status)
+	}
+	if !finalQf.Tickets[0].Unread {
+		t.Error("Tickets[0].Unread should be true after reconciliation")
+	}
+}
+
+// TestSyncFromQueueFile_UnreadSurvivesMultipleSyncs verifies that once an item
+// is marked as unread, it stays unread across multiple sync cycles. This was the
+// original bug: unread appeared for 1 tick then disappeared because the file
+// had Unread=false and the next sync clobbered the in-memory true.
+func TestSyncFromQueueFile_UnreadSurvivesMultipleSyncs(t *testing.T) {
+	tmpDir := t.TempDir()
+	queuePath := filepath.Join(tmpDir, "queue.json")
+
+	ticketPath := filepath.Join(tmpDir, "ticket.md")
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed\n---\n# Test\n"), 0644)
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "created", filePath: ticketPath, selected: true, workerStatus: "working"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+	m.currentQueueIdx = 0
+
+	// Write queue file where worker completed with Unread=true (as fixed)
+	qf := &QueueFile{
+		Name:         "Test",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "completed", Unread: true},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	// First sync: should pick up unread=true
+	m.syncFromQueueFileAtPath(queuePath)
+
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Fatal("item A should be unread after first sync")
+		}
+	}
+
+	// Second sync: should STILL be unread (this was the bug - second sync clobbered it)
+	m.syncFromQueueFileAtPath(queuePath)
+
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Error("item A should STILL be unread after second sync (was the original bug)")
+		}
+	}
+
+	// Third sync for good measure
+	m.syncFromQueueFileAtPath(queuePath)
+
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Error("item A should STILL be unread after third sync")
+		}
+	}
+}
+
+// TestSyncFromQueueFile_UnreadWriteBackPersistsToFile verifies that when the
+// sync function detects a status transition to completed, it writes the unread
+// state back to the queue file so subsequent syncs don't clobber it.
+func TestSyncFromQueueFile_UnreadWriteBackPersistsToFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Override HOME so writeQueueFile() writes to test dir
+	origHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", origHome)
+
+	queuePath := queueFilePathForID("default")
+	os.MkdirAll(filepath.Dir(queuePath), 0755)
+
+	ticketPath := filepath.Join(tmpDir, "ticket.md")
+	os.WriteFile(ticketPath, []byte("---\nStatus: completed\n---\n# Test\n"), 0644)
+
+	items := []list.Item{
+		tuiTicketItem{title: "A", status: "created", filePath: ticketPath, selected: true, workerStatus: "working"},
+	}
+	m := newTestTuiModelWithItems(items)
+	m.queue.SetItems(items)
+	m.queueRunning = true
+	m.currentQueueIdx = 0
+	m.activeQueueID = "default"
+
+	// Queue file has completed status but Unread=false (simulating the gap
+	// before the worker fix, where transition detection sets unread=true)
+	qf := &QueueFile{
+		Name:         "Test",
+		Running:      true,
+		Tickets: []QueueTicket{
+			{Path: ticketPath, Workspace: "ws", Status: "completed", Unread: false},
+		},
+	}
+	writeQueueFileDataToPath(qf, queuePath)
+
+	// Sync: should detect transition working→completed, set unread=true, write back
+	m.syncFromQueueFileAtPath(queuePath)
+
+	// Verify the in-memory state
+	for _, qi := range m.queue.Items() {
+		item := qi.(tuiTicketItem)
+		if item.title == "A" && !item.unread {
+			t.Fatal("item A should be unread in memory after sync")
+		}
+	}
+
+	// Verify the file was updated (the write-back)
+	fileQf, err := readQueueFileFromPath(queuePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fileQf.Tickets[0].Unread {
+		t.Error("queue file should have Unread=true after sync write-back")
 	}
 }

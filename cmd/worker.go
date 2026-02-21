@@ -7,11 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"wiggums/database"
 
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
@@ -27,14 +30,106 @@ var workerCmd = &cobra.Command{
 Start the TUI in one terminal and the worker in another. Press 's' in the TUI to
 start the queue, and the worker will pick up tickets automatically.
 
-Use --queue <id> to specify which queue to watch (default: "default").`,
+Use --queue <id> to specify which queue to watch (default: "default").
+If no --queue flag is given, an interactive picker shows available queues.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		queueID, _ := cmd.Flags().GetString("queue")
+		if cmd.Flags().Changed("queue") {
+			queueID, _ := cmd.Flags().GetString("queue")
+			if queueID == "" {
+				queueID = "default"
+			}
+			return runWorkerForQueue(queueID)
+		}
+		// No explicit --queue: launch interactive picker
+		queueID, err := runWorkerPicker()
+		if err != nil {
+			return err
+		}
 		if queueID == "" {
-			queueID = "default"
+			return nil // user cancelled
 		}
 		return runWorkerForQueue(queueID)
 	},
+}
+
+// workerPickerModel is a minimal Bubble Tea model for selecting a queue.
+type workerPickerModel struct {
+	list       list.Model
+	selectedID string
+	quitting   bool
+}
+
+// loadWorkerPickerItems loads queue items sorted by ticket count descending.
+func loadWorkerPickerItems() []list.Item {
+	items := loadQueuePickerItems("")
+	// Re-sort by ticketCount descending (most items first)
+	sort.SliceStable(items, func(i, j int) bool {
+		qi := items[i].(tuiQueueItem)
+		qj := items[j].(tuiQueueItem)
+		return qi.ticketCount > qj.ticketCount
+	})
+	return items
+}
+
+func newWorkerPickerModel() workerPickerModel {
+	items := loadWorkerPickerItems()
+	delegate := list.NewDefaultDelegate()
+	l := list.New(items, delegate, 0, 0)
+	l.Title = "Select a queue to watch"
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(true)
+	return workerPickerModel{list: l}
+}
+
+func (m workerPickerModel) Init() tea.Cmd {
+	return nil
+}
+
+func (m workerPickerModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.list.SetSize(msg.Width, msg.Height)
+		return m, nil
+	case tea.KeyMsg:
+		// Don't intercept keys when filtering
+		if m.list.FilterState() == list.Filtering {
+			break
+		}
+		switch msg.String() {
+		case "enter":
+			if item, ok := m.list.SelectedItem().(tuiQueueItem); ok {
+				m.selectedID = item.id
+				m.quitting = true
+				return m, tea.Quit
+			}
+		case "q", "esc", "ctrl+c":
+			m.quitting = true
+			return m, tea.Quit
+		}
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m workerPickerModel) View() string {
+	if m.quitting {
+		return ""
+	}
+	return m.list.View()
+}
+
+// runWorkerPicker runs the interactive queue picker and returns the selected queue ID.
+// Returns empty string if the user cancelled.
+func runWorkerPicker() (string, error) {
+	m := newWorkerPickerModel()
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	result, err := p.Run()
+	if err != nil {
+		return "", fmt.Errorf("picker error: %w", err)
+	}
+	final := result.(workerPickerModel)
+	return final.selectedID, nil
 }
 
 func runWorkerForQueue(queueID string) error {
@@ -114,21 +209,10 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 		nextIdx := nextPendingTicketIndex(qf)
 		if nextIdx < 0 {
 			// No pending tickets — wait for new items (don't stop the queue).
-			// Write periodic heartbeat so TUI doesn't show "Worker Lost".
+			// Don't write heartbeat here — it does a full read-modify-write of the
+			// queue file which can clobber TUI-added items (race condition).
+			// The TUI uses WorkerPID liveness checks instead.
 			devLog("WORKER poll: no pending tickets (total=%d) — waiting for new items", len(qf.Tickets))
-			if qf.CurrentIndex != -1 {
-				// Update CurrentIndex to -1 so TUI knows we're idle
-				freshQf, readErr := readQueueFileFromPath(queuePath)
-				if readErr != nil {
-					freshQf = qf
-				}
-				freshQf.CurrentIndex = -1
-				writeWorkerHeartbeatOnQf(freshQf)
-				writeQueueFileDataToPath(freshQf, queuePath)
-			} else {
-				// Already at -1 — just write heartbeat periodically
-				writeWorkerHeartbeat(queuePath)
-			}
 			if err := sleepWithContext(ctx, 2*time.Second); err != nil {
 				return nil
 			}
@@ -164,7 +248,6 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 		}
 		workingQf.Tickets[workingIdx].Status = "working"
 		workingQf.Tickets[workingIdx].StartedAt = time.Now().Unix()
-		workingQf.CurrentIndex = workingIdx // Set for TUI display
 		writeWorkerHeartbeatOnQf(workingQf)
 		writeQueueFileDataToPath(workingQf, queuePath)
 		// Update qf to the fresh copy for use later in prompt building
@@ -184,9 +267,6 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 
 		os.Setenv("TERM", "xterm")
 
-		// Build previous ticket context
-		prevContext := buildPreviousTicketContext(qf)
-
 		// Build the prompt
 		workFile := "prompts/prompt.md"
 		shortcutsFile := filepath.Join(baseDir, "workspaces", ticket.Workspace, "shortcuts.md")
@@ -201,8 +281,7 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 			}
 			errIdx := findTicketIdx(errQf, ticket.Path, ticket.RequestNum)
 			if errIdx >= 0 {
-				errQf.Tickets[errIdx].Status = "failed"
-				advanceQueueIndex(errQf)
+				errQf.Tickets[errIdx].Status = "pending"
 				writeWorkerHeartbeatOnQf(errQf)
 				writeQueueFileDataToPath(errQf, queuePath)
 			} else {
@@ -265,11 +344,6 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 			prompt += "\nYou can add new shortcuts with: `wiggums add-shortcut <text>`\n"
 		}
 
-		// Append previous ticket context
-		if prevContext != "" {
-			prompt += "\n\n" + prevContext
-		}
-
 		// Append workspace prompt if available
 		wsWorkPrompt := loadWorkspacePrompt(baseDir, ticket.Workspace, "prompts/prompt.md")
 		if wsWorkPrompt != "" {
@@ -318,10 +392,9 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 		}
 
 		if err != nil {
-			fmt.Printf("Error running claude: %v\n", err)
-			devLog("WORKER err path: marking ticket[%d] as failed, err=%v", ticketIdx, err)
-			freshQf.Tickets[ticketIdx].Status = "failed"
-			advanceQueueIndex(freshQf)
+			fmt.Printf("Error running claude: %v, will retry\n", err)
+			devLog("WORKER err path: keeping ticket[%d] as pending for retry, err=%v", ticketIdx, err)
+			freshQf.Tickets[ticketIdx].Status = "pending"
 			writeWorkerHeartbeatOnQf(freshQf)
 			writeQueueFileDataToPath(freshQf, queuePath)
 			workerRestoreOriginalStatus(ticket, savedOriginalStatus)
@@ -350,6 +423,7 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 			// Check MinIterations before marking as completed
 			if shouldReprocess := workerCheckMinIterations(ticket.Path); shouldReprocess {
 				fmt.Printf("Ticket %s: MinIterations not met, re-processing\n", filepath.Base(ticket.Path))
+				resetStatusToInProgress(ticket.Path)
 				freshQf.Tickets[ticketIdx].Status = "working"
 				writeWorkerHeartbeatOnQf(freshQf)
 				writeQueueFileDataToPath(freshQf, queuePath)
@@ -394,6 +468,7 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 				continue
 			}
 			freshQf.Tickets[ticketIdx].Status = "completed"
+			freshQf.Tickets[ticketIdx].Unread = true
 
 			// Sync additional request status to DB so TUI displays correct status on reload
 			if ticket.RequestNum > 0 && database.DB != nil {
@@ -404,14 +479,9 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 				_ = notifier.Notify("Wiggums Worker", fmt.Sprintf("Verified: %s", filepath.Base(ticket.Path)), "")
 			}
 		} else {
-			fmt.Printf("Claude exited with code %d for: %s\n", exitCode, filepath.Base(ticket.Path))
-			devLog("WORKER non-zero exit: code=%d, frontmatter not completed, marking ticket[%d] as failed", exitCode, ticketIdx)
-			freshQf.Tickets[ticketIdx].Status = "failed"
-
-			// Sync additional request status to DB so TUI displays correct status on reload
-			if ticket.RequestNum > 0 && database.DB != nil {
-				_ = database.UpdateAdditionalRequestStatus(ctx, ticket.Path, ticket.RequestNum, "failed")
-			}
+			fmt.Printf("Claude exited with code %d for: %s, will retry\n", exitCode, filepath.Base(ticket.Path))
+			devLog("WORKER non-zero exit: code=%d, frontmatter not completed, keeping ticket[%d] as pending for retry", exitCode, ticketIdx)
+			freshQf.Tickets[ticketIdx].Status = "pending"
 		}
 
 		// Combine status update + advance into a single atomic write to
@@ -419,7 +489,7 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 		devLog("WORKER final write: ticket[%d] status=%q, about to advance", ticketIdx, freshQf.Tickets[ticketIdx].Status)
 		advanceQueueIndex(freshQf)
 		writeWorkerHeartbeatOnQf(freshQf)
-		devLog("WORKER final write: Running=%v CurrentIndex=%d", freshQf.Running, freshQf.CurrentIndex)
+		devLog("WORKER final write: Running=%v tickets=%d", freshQf.Running, len(freshQf.Tickets))
 		writeQueueFileDataToPath(freshQf, queuePath)
 
 		// Restore original frontmatter status after processing additional request.
@@ -441,9 +511,8 @@ func workerRestoreOriginalStatus(ticket QueueTicket, savedOriginalStatus string)
 	}
 }
 
-// advanceQueueIndex increments CurrentIndex on the QueueFile struct, stopping
-// the queue if all tickets have been processed. Does NOT write to disk —
-// the caller is responsible for writing. This allows combining status updates
+// advanceQueueIndex enforces queue ordering after a ticket completes.
+// Does NOT write to disk — the caller is responsible for writing. This allows combining status updates
 // and index advances into a single atomic write.
 // nextPendingTicketIndex computes the next ticket to process from statuses alone.
 // Bottom-to-top processing: returns the last (highest-index) ticket that needs work.
@@ -462,7 +531,7 @@ func nextPendingTicketIndex(qf *QueueFile) int {
 }
 
 // allTicketsProcessed returns true if every ticket in the queue has a terminal
-// status (completed or failed) and there's nothing left for the worker to do.
+// status (completed) and there's nothing left for the worker to do.
 func allTicketsProcessed(qf *QueueFile) bool {
 	if len(qf.Tickets) == 0 {
 		return true
@@ -471,7 +540,7 @@ func allTicketsProcessed(qf *QueueFile) bool {
 		if t.IsDraft {
 			continue // drafts don't count as pending work
 		}
-		if t.Status != "completed" && t.Status != "failed" {
+		if t.Status != "completed" {
 			return false
 		}
 	}
@@ -480,15 +549,11 @@ func allTicketsProcessed(qf *QueueFile) bool {
 
 func advanceQueueIndex(qf *QueueFile) {
 	enforceQueueFileOrdering(qf)
-	prev := qf.CurrentIndex
-	qf.CurrentIndex = nextPendingTicketIndex(qf)
-	devLog("WORKER advanceQueueIndex: %d → %d (computed from statuses)", prev, qf.CurrentIndex)
 }
 
 // enforceQueueFileOrdering rearranges QueueFile tickets so that all mutable
-// tickets (pending/working/draft) come before immutable tickets (completed/failed).
-// Preserves relative order within each group. Updates CurrentIndex to track the
-// same ticket after reordering.
+// tickets (pending/working/draft) come before immutable tickets (completed).
+// Preserves relative order within each group.
 func enforceQueueFileOrdering(qf *QueueFile) {
 	if len(qf.Tickets) <= 1 {
 		return
@@ -514,13 +579,6 @@ func enforceQueueFileOrdering(qf *QueueFile) {
 
 	// Partition: mutable first, immutable second
 	var mutable, immutable []QueueTicket
-	// Track which ticket CurrentIndex pointed to
-	var currentTicket *QueueTicket
-	if qf.CurrentIndex >= 0 && qf.CurrentIndex < len(qf.Tickets) {
-		t := qf.Tickets[qf.CurrentIndex]
-		currentTicket = &t
-	}
-
 	for _, t := range qf.Tickets {
 		if isQueueTicketImmutable(t) {
 			immutable = append(immutable, t)
@@ -534,23 +592,13 @@ func enforceQueueFileOrdering(qf *QueueFile) {
 	reordered = append(reordered, immutable...)
 	qf.Tickets = reordered
 
-	// Restore CurrentIndex to point to the same ticket
-	if currentTicket != nil {
-		for i, t := range qf.Tickets {
-			if t.Path == currentTicket.Path && t.RequestNum == currentTicket.RequestNum {
-				qf.CurrentIndex = i
-				break
-			}
-		}
-	}
-
 	devLog("WORKER enforceQueueFileOrdering: reordered %d mutable + %d immutable tickets", len(mutable), len(immutable))
 }
 
 // isQueueTicketImmutable returns true if a QueueTicket should not be reordered
-// above mutable items. Completed and failed tickets are immutable.
+// above mutable items. Completed tickets are immutable.
 func isQueueTicketImmutable(t QueueTicket) bool {
-	return t.Status == "completed" || t.Status == "failed"
+	return t.Status == "completed"
 }
 
 // advanceQueue moves to the next ticket in the queue, or stops if done.
@@ -578,7 +626,7 @@ func writeQueueFileData(qf *QueueFile) error {
 // Uses atomic write (temp file + rename) to prevent corruption from concurrent
 // TUI/worker writes or mid-write crashes.
 func writeQueueFileDataToPath(qf *QueueFile, path string) error {
-	devLog("writeQueueFileDataToPath: Running=%v CurrentIndex=%d tickets=%d path=%s", qf.Running, qf.CurrentIndex, len(qf.Tickets), filepath.Base(path))
+	devLog("writeQueueFileDataToPath: Running=%v tickets=%d path=%s", qf.Running, len(qf.Tickets), filepath.Base(path))
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -638,7 +686,7 @@ func resolveWorkDirForTicket(baseDir, workspace string) string {
 
 // buildPreviousTicketContext creates a context string describing previously completed
 // tickets in the queue so the current ticket can reference their work.
-// Stateless: looks at ticket statuses rather than relying on CurrentIndex position.
+// Stateless: looks at ticket statuses to identify completed tickets.
 func buildPreviousTicketContext(qf *QueueFile) string {
 	var completed []QueueTicket
 	for _, t := range qf.Tickets {
@@ -800,7 +848,7 @@ func workerReconcileTicket(ctx context.Context, baseDir string, ticket QueueTick
 			return true // removed from queue
 		}
 		freshQf.Tickets[idx].Status = "completed"
-		freshQf.CurrentIndex = idx
+		freshQf.Tickets[idx].Unread = true
 		advanceQueueIndex(freshQf)
 		writeWorkerHeartbeatOnQf(freshQf)
 		writeQueueFileDataToPath(freshQf, queuePath)
@@ -837,7 +885,6 @@ func workerReconcileTicket(ctx context.Context, baseDir string, ticket QueueTick
 	}
 	freshQf.Tickets[idx].Status = "working"
 	freshQf.Tickets[idx].StartedAt = time.Now().Unix()
-	freshQf.CurrentIndex = idx
 	writeWorkerHeartbeatOnQf(freshQf)
 	writeQueueFileDataToPath(freshQf, queuePath)
 
@@ -856,12 +903,13 @@ func workerReconcileTicket(ctx context.Context, baseDir string, ticket QueueTick
 	if verified {
 		fmt.Printf("Reconcile: ticket %s verified successfully\n", filepath.Base(ticket.Path))
 		freshQf2.Tickets[idx2].Status = "completed"
+		freshQf2.Tickets[idx2].Unread = true
 		if notifier != nil {
 			_ = notifier.Notify("Wiggums Worker", fmt.Sprintf("Reconciled & verified: %s", filepath.Base(ticket.Path)), "")
 		}
 	} else {
-		fmt.Printf("Reconcile: ticket %s verification failed, marking as failed\n", filepath.Base(ticket.Path))
-		freshQf2.Tickets[idx2].Status = "failed"
+		fmt.Printf("Reconcile: ticket %s verification failed, will retry\n", filepath.Base(ticket.Path))
+		freshQf2.Tickets[idx2].Status = "pending"
 	}
 
 	advanceQueueIndex(freshQf2)
