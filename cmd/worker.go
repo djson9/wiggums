@@ -291,26 +291,22 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 			continue
 		}
 
-		// Set ticket status to "additional_user_request" at run time when
-		// processing an additional request item. This defers the status change
-		// to queue processing time rather than creation time.
-		// Save original status first so we can restore it after processing (immutable history).
+		// Snapshot frontmatter status before running Claude so we can restore
+		// on non-zero exit (prevents partially-written "completed" from being
+		// auto-verified via SkipVerification on retry).
 		var savedOriginalStatus string
+		if fContent, readErr := os.ReadFile(ticket.Path); readErr == nil {
+			s := extractFrontmatterStatus(string(fContent))
+			if idx := strings.Index(s, ":"); idx >= 0 {
+				savedOriginalStatus = strings.TrimSpace(s[idx+1:])
+			}
+		}
+
+		// For additional requests, prefer the DB-stored original status (crash-resilient).
 		if ticket.RequestNum > 0 {
-			// Read original status from DB (crash-resilient).
 			if database.DB != nil {
 				if orig, dbErr := database.GetOriginalTicketStatus(ctx, ticket.Path); dbErr == nil && orig != "" {
 					savedOriginalStatus = orig
-				}
-			}
-			// Fallback: read current frontmatter before mutation.
-			if savedOriginalStatus == "" {
-				if fContent, readErr := os.ReadFile(ticket.Path); readErr == nil {
-					s := extractFrontmatterStatus(string(fContent))
-					s = strings.ToLower(strings.TrimSpace(s))
-					if idx := strings.Index(s, ":"); idx >= 0 {
-						savedOriginalStatus = strings.TrimSpace(s[idx+1:])
-					}
 				}
 			}
 			// Write additional request content to ticket file if not already present.
@@ -329,6 +325,8 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 		// bump CurIteration, causing premature MinIterations completion.
 		incrementCurIteration(ticket.Path)
 		prompt = strings.ReplaceAll(prompt, "{{SHORTCUTS_PATH}}", shortcutsFile)
+		prompt = strings.ReplaceAll(prompt, "{{WORKSPACE}}", ticket.Workspace)
+		prompt = strings.ReplaceAll(prompt, "{{QUEUE_ID}}", queueIDFromPath(queuePath))
 
 		// Append queue prompt if set
 		if qf.Prompt != "" {
@@ -401,20 +399,20 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 			continue
 		}
 
-		// Determine if the ticket was actually completed despite a non-zero exit code.
-		// Claude CLI exits with code -1 (signal kill) ~95% of the time in pipe mode.
-		// Check frontmatter to see if Claude completed the work before being killed.
+		// On non-zero exit (interrupt, signal kill, error), restore the ticket
+		// status to what it was before Claude ran. This prevents a partially-written
+		// "completed" from being auto-verified via SkipVerification.
 		treatAsSuccess := exitCode == 0
-		if exitCode != 0 {
+		if exitCode != 0 && savedOriginalStatus != "" {
 			content, readFileErr := os.ReadFile(ticket.Path)
 			if readFileErr == nil {
 				fmStatus := extractFrontmatterStatus(string(content))
 				fmLower := strings.ToLower(fmStatus)
 				isCompleted := strings.Contains(fmLower, "completed") && !strings.Contains(fmLower, "not completed")
 				if isCompleted {
-					fmt.Printf("Claude exited with code %d but ticket frontmatter says completed: %s\n", exitCode, filepath.Base(ticket.Path))
-					devLog("WORKER non-zero exit: code=%d but frontmatter=%q — treating as success", exitCode, fmStatus)
-					treatAsSuccess = true
+					fmt.Printf("Claude exited with code %d, restoring ticket %s status to %q\n", exitCode, filepath.Base(ticket.Path), savedOriginalStatus)
+					devLog("WORKER non-zero exit: code=%d, restoring status from %q to %q", exitCode, fmStatus, savedOriginalStatus)
+					restoreFrontmatterStatus(ticket.Path, savedOriginalStatus)
 				}
 			}
 		}
@@ -433,7 +431,7 @@ func workerLoopWithPath(ctx context.Context, baseDir string, runner Runner, prom
 				continue
 			}
 
-			// Run verification pass (mirrors main runLoop behavior)
+			// Run verification pass
 			verified := workerRunVerification(ctx, baseDir, ticket, runner, promptLoader, notifier, claudeArgs, queuePath)
 			if !verified {
 				// Verification failed — keep ticket as "working" for re-processing
@@ -766,6 +764,8 @@ func workerRunVerification(ctx context.Context, baseDir string, ticket QueueTick
 
 	shortcutsFile := filepath.Join(baseDir, "workspaces", ticket.Workspace, "shortcuts.md")
 	prompt = strings.ReplaceAll(prompt, "{{SHORTCUTS_PATH}}", shortcutsFile)
+	prompt = strings.ReplaceAll(prompt, "{{WORKSPACE}}", ticket.Workspace)
+	prompt = strings.ReplaceAll(prompt, "{{QUEUE_ID}}", queueIDFromPath(queuePath))
 
 	// Append workspace verify prompt if available
 	wsVerifyPrompt := loadWorkspacePrompt(baseDir, ticket.Workspace, "prompts/verify.md")

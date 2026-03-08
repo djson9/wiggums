@@ -1009,6 +1009,12 @@ func queueFilePathForID(id string) string {
 	return filepath.Join(home, ".wiggums", "queues", id+".json")
 }
 
+// queueIDFromPath extracts the queue ID from a queue file path (e.g. "/.../.wiggums/queues/default.json" -> "default").
+func queueIDFromPath(path string) string {
+	base := filepath.Base(path)
+	return strings.TrimSuffix(base, ".json")
+}
+
 // queuesDir returns the path to the queues directory.
 func queuesDir() string {
 	home, err := os.UserHomeDir()
@@ -4028,7 +4034,7 @@ Examples:
 			}
 			ticketName = strings.ReplaceAll(ticketName, "_", " ")
 
-			fmt.Printf("%s%s %s [%s]\n", marker, statusIcon, ticketName, t.Workspace)
+			fmt.Printf("%s%s %s [%s]\n", marker, statusIcon, ticketName, name)
 		}
 
 		return nil

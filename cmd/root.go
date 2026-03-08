@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -20,15 +22,10 @@ func init() {
 }
 
 var rootCmd = &cobra.Command{
-	Use:               "wiggums [workspace]",
-	Short:             "Ticket automation loop powered by Claude Code",
-	Args:              cobra.ArbitraryArgs,
-	ValidArgsFunction: completeWorkspaces,
+	Use:   "wiggums",
+	Short: "Ticket automation loop powered by Claude Code",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 {
-			return cmd.Help()
-		}
-		return runWorkspace(args[0], args[1:])
+		return cmd.Help()
 	},
 }
 
@@ -108,4 +105,36 @@ func Execute() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// readWorkspaceDirectory reads the Directory field from a workspace index.md frontmatter.
+func readWorkspaceDirectory(indexPath string) (string, error) {
+	f, err := os.Open(indexPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	delimCount := 0
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.TrimSpace(line) == "---" {
+			delimCount++
+			if delimCount >= 2 {
+				break
+			}
+			continue
+		}
+		if delimCount == 1 {
+			lower := strings.ToLower(strings.TrimSpace(line))
+			if strings.HasPrefix(lower, "directory:") {
+				parts := strings.SplitN(line, ":", 2)
+				if len(parts) == 2 {
+					return strings.TrimSpace(parts[1]), nil
+				}
+			}
+		}
+	}
+	return "", nil
 }

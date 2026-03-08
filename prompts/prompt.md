@@ -8,60 +8,65 @@ Your current working directory is the wiggums directory — it contains tickets,
 
 Your assigned ticket is listed at the end of this prompt. Work on ONLY that ticket.
 
-Please include steps of how you were able to reach findings section in ticket.
+## Ticket Commands
+
+View your assigned ticket:
+
+```bash
+wiggums ticket view <ticket-id>
+```
+
+List all tickets in this queue:
+
+```bash
+wiggums queue inspect {{QUEUE_ID}}
+```
+
+View any other ticket in the queue (to see prior work and context):
+
+```bash
+wiggums ticket view <other-ticket-id>
+```
+
+Update your ticket with progress:
+
+```bash
+wiggums ticket update (to create the new sections)
+Then populate these sections.
+```
 
 ## How to Work in This Repo
-Work on ONLY the ticket listed at the end of this prompt. Do not browse the tickets/ directory for additional tickets to work on. Do not pick up extra tickets. Do not remove tickets.
 
-Please document key decisions and key findings in the ticket as you work. Please update the ticket periodically as you work, not all at the end.
-
-Do not update any fields in the YAML front matter besides status. The infra will update those.
-
-Please include execution plan WITHIN the ticket.
-
-Sometimes a ticket is completed, but the grep needs to return nothing to actually complete. So we should add status: completed on any tickets that are actually completed.
-
-If a human adds a ticket file to the tickets directory (it likely just be a title and text inside), please add the metadata WITHOUT changing the original content, and have the title match our format as well.
-
-Please read `{{SHORTCUTS_PATH}}` for tips on iteration shortcuts to help us iterate faster.
+Please document key decisions and key findings via `wiggums ticket update` as you work.
 
 ### Referencing other tickets
+
 Please use markdown format:
 [[tickets/test_ticket.md|Hello world title]]
 To reference other tickets.
 
 ## Beginning the Ticket
 
-IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find tickets that may be related to this one, and read the relevant issues. Be skeptical of the conclusions given by the explore agent, because it sometimes does not return the full context. Use explore agent mostly to find files, but do not trust it's conclusions and read the files yourself.
+IMPORTANT: BEFORE BEGINNING use the explore subagent (just this once) to find tickets that may be related to this one, and read the relevant issues. Use wiggums queue inspect / wiggums ticket view only. Do not scan file system. Be skeptical of the conclusions given by the explore agent, because it sometimes does not return the full context. Use explore agent mostly to find files, but do not trust it's conclusions and read the files yourself.
 
-To understand the state of the repo, try running `git diff master...`
+Do NOT use subagents or tasks or plan mode! (Except for the initial explore agent to look at relevant tickets.)
 
-Add your plan to tackle the ticket in the same file as the ticket.
-
-Do NOT use subagents or tasks! (Except for the initial explore agent to look at relevant tickets.)
-
-We should at least have these sections for tickets:
-
-### Additional Context
-If we gathered any additional context at the request of the user, describe it here. This could include additional context gathered from github, linear, slack, etc.
-### Commands Run / Actions Taken
-Describe commands run and actions take to achieve the result.
-### Results
-Describe the result and what was accomplished.
 ### Verification Commands / Steps
+
 After implementing you should always verify manually. You should run a set of mental test cases (don't actually create test cases) that allow you to test manually. Think outside the box in ways to test this. Always verify end to end. If making UI changes, verify the UI. If making CLI changes, run the CLI command.
 
 ## What does good verification look like?
+
 Please properly verify, or the user will be upset. Here are examples of good and bad verification behavior.
 
-Bad:  Verified only that dialog appears, not actually running the command
+Bad: Verified only that dialog appears, not actually running the command
 Bad: Verified only that help menu appears, not actually running the command
 Bad: Verified only that code looks correct, not actually running the command
 Good: Inspecting state before
 Good: Running the command end to end
 Good: Inspecting state after
 Good: Verifying that the state changed in the expected manner
-Bad: Verified only that the backend works, not that the frontend displays it 
+Bad: Verified only that the backend works, not that the frontend displays it
 Bad: Verified only that the command ran, not that the output changed
 Bad: Verified only that am audio status shows playing, not that TUI shows ▶
 Bad: Checked state once after action without comparing to state before  
@@ -72,21 +77,6 @@ Good: Verify specific text changed (e.g., ⏹ became ▶, 00:00 became 00:05)
 
 Describes the commands and steps used to verify the result. Note whether we were able to fully test it end to end. Give a percent for the verification completed and % left.
 
+---
 
-----
-<IMPORTANT>
-When finished with ANY ticket, mark it as `status: completed` by writing it in the header of the file.
-</IMPORTANT>
-
-## Shortcuts
-<shortcuts.md>
-In each session, there will be workflows that will take some time to figure out. For example, we may stumble around trying to figure out the best way to manually test something.
-
-Reflect on what workflows took a long term to figure out, specifically thinking about workflows that would be useful for future runs. Try to generalize one layer up, while still citing commands and relevant code. Shortcuts contains learnings that will help us "shortcut" through this hard to understand bits, and iterate faster.
-
-Think deeply about "why was iteration difficult" what breakthroughs helped us to iterate faster? What specific engineering concepts and workflows helped us iterate faster?
-
-Include those learnings and shortcuts in `{{SHORTCUTS_PATH}}`, please be as concise as possible.
-</shortcuts.md>
-
-
+On completion of ticket run `wiggums ticket complete <id>`.

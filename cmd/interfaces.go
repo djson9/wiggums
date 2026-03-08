@@ -26,21 +26,6 @@ type Notifier interface {
 	Notify(title, message, icon string) error
 }
 
-// loopConfig holds all dependencies and parameters for the main loop.
-type loopConfig struct {
-	runner        Runner
-	promptLoader  PromptLoader
-	notifier      Notifier
-	baseDir       string
-	ticketsDir    string
-	claudeArgs    []string
-	agentFilter   string
-	ticketFilter  string // substring match on ticket filename
-	workDir       string // external working directory for claude (e.g., workspace target repo)
-	shortcutsFile string // absolute path to the workspace's shortcuts.md
-	workspaceName string // name of the workspace being processed
-}
-
 // ClaudeRunner is the real Runner implementation that shells out to the claude CLI.
 type ClaudeRunner struct {
 	WorkDir string // if set, claude runs in this directory
@@ -105,8 +90,13 @@ func (f *FilePromptLoader) Load(baseDir, promptFile, header string, tickets []st
 	b.WriteString(header)
 	b.WriteString("\n")
 	for _, ticket := range tickets {
+		base := filepath.Base(ticket)
+		id := strings.TrimSuffix(base, ".md")
+		if idx := strings.IndexByte(id, '_'); idx > 0 {
+			id = id[:idx]
+		}
 		b.WriteString("- ")
-		b.WriteString(ticket)
+		b.WriteString(id)
 		b.WriteString("\n")
 	}
 
